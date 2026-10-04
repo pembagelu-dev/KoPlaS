@@ -52,48 +52,87 @@ Anschließend die Abhängigkeiten installieren:
 python -m pip install PySide6 pandas ortools python-docx openpyxl
 ```
 
-## Start
-
-Im Projektverzeichnis die grafische Anwendung starten:
-
-```bash
-python KoPlaS.py
-```
-
-Danach können Daten über die Importfunktionen der Anwendung geladen, ein Plan erstellt und bei Bedarf manuell angepasst werden. Die Exportvarianten sind über die Exportmenüs erreichbar.
-
 ## Module
 
 | Datei | Aufgabe |
 | --- | --- |
 | `KoPlaS.py` | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
 | `kolloPlaner.py` | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
-| `import_asv.py` | Einlesen und Umformen von ASV-CSV-Daten; als eigenständiger Importer nutzbar |
+| `import_asv.py` | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
 | `export.py` | Erzeugung der Word-Pläne und Excel-Tabellen |
-| `report.py` | Erstellung eines Word-Statistikreports aus einer Plan-JSON-Datei |
-
-### ASV-Import als Kommandozeilenprogramm
-
-Der Importer kann eine ASV-CSV-Datei einlesen und `pruefungen.csv` im aktuellen Arbeitsverzeichnis erzeugen:
-
-```bash
-python import_asv.py "Abiturfächer Kurse.csv"
-```
-
-### Statistikreport als Kommandozeilenprogramm
-
-Aus einer Plan-JSON-Datei kann direkt ein Word-Report erstellt werden:
-
-```bash
-python report.py kolloquiumsplan.json --output statistik.docx --title "Kolloquiumsplan – Statistik"
-```
+| `report.py` | Erstellung des Word-Statistik- und Belastungsreports |
 
 ## Hinweise
 
 - Der Solver berücksichtigt harte Bedingungen zwingend und verwendet weiche Bedingungen zur Bewertung beziehungsweise Optimierung von Planvarianten.
 - Die grafische Oberfläche unterstützt die Prüfung von Konflikten auch nach manuellen Änderungen.
 - Für die Word- und Excel-Ausgaben müssen `python-docx` beziehungsweise `openpyxl` installiert sein.
+- Der reguläre Planungsablauf erfolgt über die grafische Oberfläche. Die übrigen Python-Dateien stellen dafür Import-, Solver-, Export- und Reportfunktionen bereit.
 
-## Versionsstand
+## Version und Änderungshistorie
 
-Die Versionsangaben der Module sind in den jeweiligen Quelldateien dokumentiert. Die grafische Anwendung führt ihre Version in `KoPlaS.py`.
+**Aktuelle Version: 1.2.7 (Build 14.49.39)**
+
+### Version 1.2.7
+
+- Drei Word-Exportvarianten für Lehrkräfte, Schüler und Reinigungspersonal mit Auswahldialog
+- Belastungswerte im Report werden nur für eingeplante Lehrkräfte berücksichtigt
+
+### Version 1.2.6
+
+- Suchfunktion für Schüler, Prüfer, Beisitzer und Themen
+- Änderungen an Zeiten, Räumen und Bedingungen werden beim Schließen gespeichert
+
+### Version 1.2.5
+
+- Erweiterte Absperrungs- und Vorbereitungsplanung mit NTA-Berücksichtigung
+- Belastungsparameter können angepasst und gespeichert werden
+- Excel-Export enthält Themen; die auszugebenden Spalten sind auswählbar
+
+### Version 1.2.4
+
+- Fairere Verteilung der Prüfungsslots pro Schüler
+- Lehrkräfte- und Kursdaten können angepasst und gespeichert werden
+- Dialoggrößen und Blockdarstellung wurden für unterschiedliche Betriebssysteme angepasst
+
+### Version 1.2.3
+
+- Prüfungskopplungen mit bis zu fünf Prüfungen
+- Konfliktmarkierungen beim Öffnen einer Datei und Prüfungszahlen pro Tag
+- Räume können über ein Kontextmenü geändert, ergänzt und entfernt werden
+
+### Version 1.2.2
+
+- Statistikreport um Lehrkräftedaten erweitert
+- Dateistatus und Protokollmeldungen verbessert
+- Speichern unter sowie eine Summenzeile im Lehrkräfte-Dialog ergänzt
+- Prüfungen im Parkplatz werden ohne ungültige Slotdaten geführt
+
+### Version 1.2
+
+- Deutsche PySide6-Übersetzungen und native Dialoge
+
+### Version 1.1
+
+- Import von Lehrkräften mit UPZ sowie Oberstufenkursen mit WS-, S- und K-Daten
+- Schulname und Vorbereitungsraum in den Plan übernommen
+- Prüfungsbelastung und Raum-/Zeitsortierung ergänzt
+- Speichern bei Änderungen sowie weitere Einstellungen für Lehrkräfte ergänzt
+
+### Version 1.0
+
+- Grafische Oberfläche mit manueller Prüfungsverschiebung
+- Parkplatz für nicht zugewiesene Prüfungen
+- Prüfung von Bedingungen bei manuellen Änderungen sowie Undo und Redo für die Slotplanung
+- Word-Export
+
+### Version 0.1
+
+- Erste CP-SAT-Planung mit verschiebbaren Prüfungen und Word-Export
+
+### Laufende Fehlerbehebungen
+
+- Importprüfungen und Fehlermeldungen vereinheitlicht; Probleme mit doppelten Kursimporten und überschriebenen Daten behoben
+- Konflikt- und Bedingungsprüfung bei Drag-and-drop sowie Änderungen an Prüfungen konsolidiert
+- Berechnung von Tagesabständen, Prüferlimits und Belastungswerten korrigiert
+- Speichern, Undo/Redo, Statusmeldungen und Kontextmenüs weiter stabilisiert
