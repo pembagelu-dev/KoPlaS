@@ -1275,7 +1275,7 @@ class DataController(QObject):
             teachers_map = {}
 
         stats = REP.build_statistics(plan_rows, teachers_map=teachers_map)
-        doc = REP.build_doc(stats, title, "GUI")
+        doc = REP.build_doc(stats, title)
         doc.save(out_docx)
         self.status(f"Report erstellt: {os.path.basename(out_docx)}")
 

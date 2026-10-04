@@ -58,9 +58,9 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 | --- | --- |
 | `KoPlaS.py` | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
 | `kolloPlaner.py` | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
-| `import_asv.py` | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
+| `import_asv.py` (0.1 Build 5) | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
 | `export.py` | Erzeugung der Word-Pläne und Excel-Tabellen |
-| `report.py` | Erstellung des Word-Statistik- und Belastungsreports |
+| `report.py` (0.3 Build 9) | Erstellung des Word-Statistik- und Belastungsreports |
 
 ## Hinweise
 
@@ -72,6 +72,10 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 ## Version und Änderungshistorie
 
 **Aktuelle Version: 1.2.7 (Build 14.49.39)**
+
+Das Report-Modul trägt Version **0.3 Build 9**. Der CLI-Report nennt die Quelldatei im Dokument; die GUI zeigt keinen künstlichen Quellen-Platzhalter. Eine ungenutzte Ausrichtungsfunktion wurde entfernt.
+
+Das ASV-Importmodul trägt Version **0.1 Build 5**. Wiederholt erzeugte CSV-Helfer wurden aus Zeilenschleifen verschoben und ungenutzte Werte entfernt; die Importformate und Rückgabedaten bleiben unverändert.
 
 ### Version 1.2.7
 

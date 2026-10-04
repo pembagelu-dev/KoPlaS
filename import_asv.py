@@ -1,11 +1,12 @@
-Version = "0.1 (Build 4)"
+Version = "0.1 (Build 5)"
 
 """
-Importschnittstelle Version 0.1 Build 4
+Importschnittstelle Version 0.1 Build 5
 
 ----------
 ChangeLog
 ----------
+Build 5: Unbenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen gezogen und Zahlenkonvertierung gezielter abgesichert
 Import der Prüfungen aus ASV
 Import der Lehrkräfte der Schule (Kürzel) mit UPZ für Belastungsrechnung
 Import der Oberstufenkurse mit WS, Teilnehmer in S und K sowie LF-Kürzel als Zuordnung
@@ -90,7 +91,22 @@ def parse_csv(input_path: str) -> List[Dict[str, str]]:
             return False
         if len(row) <= idx_name + 2:
             return False
-        return (row[idx_name + 1] == "" and row[idx_name + 2] == "--")
+        return row[idx_name + 1] == "" and row[idx_name + 2] == "--"
+
+    def safe_get(row: List[str], idx: int) -> str:
+        return row[idx].strip() if idx < len(row) else ""
+
+    def fix_smw_suffix(fach: str, pruefer: str) -> tuple[str, str]:
+        fach_value = (fach or "").strip()
+        pruefer_value = (pruefer or "").strip()
+        # Wenn Fach wie "3SMW" (ohne Endziffer), prüfen, ob Prüfer nur aus einer einzelnen Ziffer besteht.
+        if re.fullmatch(r'^[23]\s*SMW$', fach_value, flags=re.IGNORECASE) and re.fullmatch(r'^\d$', pruefer_value):
+            # Ziffer an Fach anhängen und Prüfer leeren
+            return f"{fach_value}{pruefer_value}", ""
+        # Auch Fälle mit gemischten Spaces/Fachkern wie "3 SMW" abfangen
+        if re.fullmatch(r'^[23]\s*SMW\s*$', fach_value, flags=re.IGNORECASE) and re.fullmatch(r'^\d$', pruefer_value):
+            return f"{fach_value.strip()}{pruefer_value}", ""
+        return fach_value, pruefer_value
 
     i = 1
     total_rows = len(rows)
@@ -127,9 +143,6 @@ def parse_csv(input_path: str) -> List[Dict[str, str]]:
 
         data_row = rows[j]
 
-        def safe_get(r: List[str], idx: int) -> str:
-            return r[idx].strip() if idx < len(r) else ""
-
         fach1 = safe_get(data_row, idx_k1)
         pruefer1 = safe_get(data_row, idx_k1_next)
         fach2 = safe_get(data_row, idx_k2)
@@ -138,19 +151,6 @@ def parse_csv(input_path: str) -> List[Dict[str, str]]:
         # --- Robustheitsfix für SMW/smw-Kursbezeichnungen, bei denen die Endziffer "in die nächste Spalte rutscht" ---
         # Manche ASV-Exporte haben bei Kursen wie "3SMW1" ein Spaltenversatz-Problem, sodass in K1/K2 nur "3SMW"
         # steht und die nachfolgende "1" in der Prüfer-Spalte landet. Dann hier die Ziffer zurück anfügen.
-        import re
-        def fix_smw_suffix(fach: str, pruefer: str) -> tuple[str, str]:
-            f = (fach or "").strip()
-            p = (pruefer or "").strip()
-            # Wenn Fach wie "3SMW" (ohne Endziffer), dann prüfen, ob Prüfer nur aus einer einzelnen Ziffer besteht.
-            if re.fullmatch(r'^[23]\s*SMW$', f, flags=re.IGNORECASE) and re.fullmatch(r'^\d$', p):
-                # Ziffer an Fach anhängen und Prüfer leeren
-                return f"{f}{p}", ""
-            # Auch Fälle mit gemischten Spaces/Fachkern wie "3 SMW" abfangen
-            if re.fullmatch(r'^[23]\s*SMW\s*$', f, flags=re.IGNORECASE) and re.fullmatch(r'^\d$', p):
-                return f"{f.strip()}{p}", ""
-            return f, p
-
         fach1, pruefer1 = fix_smw_suffix(fach1, pruefer1)
         fach2, pruefer2 = fix_smw_suffix(fach2, pruefer2)
 
@@ -303,7 +303,6 @@ def read_teachers_asv(input_path: str) -> List[Dict[str, str]]:
             except ValueError:
                 return None
 
-        i_fam = idx("Familienname")
         i_kurz = idx("Kürzel")
         i_upz = idx("UPZ")
         if i_kurz is None or i_upz is None:
@@ -331,8 +330,6 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
     #{"Lehrkraft": <LK>, "S": <int>, "K": <int>, "WS": <int>, "school_name": <str>}
     
     results: List[Dict[str, Any]] = []
-    school_name: str = ""
-
     def parse_school_name(s: str) -> str:
         # erwartet z. B. "0306 - Chiemgau-Gymnasium Traunstein;..."
         # Wir nehmen den Inhalt NACH ' - ' in der ersten Zelle
@@ -363,7 +360,7 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
 
     def find_indices(header_row: List[str]) -> Dict[str, Optional[int]]:
         # Suche nach den gesuchten Überschriften (exakt oder getrimmt)
-        idx_map = {k: None for k in hdr_idx.keys()}
+        idx_map: Dict[str, Optional[int]] = {k: None for k in hdr_idx}
         for i, cell in enumerate(header_row or []):
             name = (cell or "").strip()
             if name in idx_map:
@@ -377,6 +374,17 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
 
     def row_is_empty(row: List[str]) -> bool:
         return all((c or "").strip() == "" for c in (row or []))
+
+    def safe_get(row: List[str], idx: Optional[int]) -> str:
+        if idx is None:
+            return ""
+        return (row[idx] if idx < len(row) else "") or ""
+
+    def to_int(value: str) -> int:
+        try:
+            return int(value.strip()) if value.strip() != "" else 0
+        except ValueError:
+            return 0
 
     parsing = False
     current_idx = hdr_idx.copy()
@@ -404,26 +412,15 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
             continue
 
         # Datenzeile: robust auslesen
-        def safe_get(idx: Optional[int]) -> str:
-            if idx is None:
-                return ""
-            return (r[idx] if idx < len(r) else "") or ""
-
-        lk = safe_get(current_idx.get("LK")).strip()
-        ws_txt = safe_get(current_idx.get("Std.")).strip()
-        s_txt = safe_get(current_idx.get("S")).strip()
-        k_txt = safe_get(current_idx.get("K")).strip()
-        kurs = safe_get(current_idx.get("Kurs")).strip()
+        lk = safe_get(r, current_idx.get("LK")).strip()
+        ws_txt = safe_get(r, current_idx.get("Std.")).strip()
+        s_txt = safe_get(r, current_idx.get("S")).strip()
+        k_txt = safe_get(r, current_idx.get("K")).strip()
+        kurs = safe_get(r, current_idx.get("Kurs")).strip()
 
         # Ggf. trivialer Filter: ohne Kürzel keine Kurszeile
         if lk == "":
             continue
-
-        def to_int(x: str) -> int:
-            try:
-                return int(x.strip()) if x.strip() != "" else 0
-            except Exception:
-                return 0
 
         rec = {
             "Lehrkraft": lk,

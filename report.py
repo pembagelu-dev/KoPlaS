@@ -1,4 +1,4 @@
-Version = "0.3 Build 7"
+Version = "0.3 Build 9"
 
 """
 Reportschnittstelle
@@ -6,6 +6,8 @@ Reportschnittstelle
 ----------
 ChangeLog
 ----------
+Build 9: Nicht genutzte Ausrichtungsfunktion entfernt; Quelldateiname wird bei CLI-Reports ausgegeben
+Build 8: Ungenutzte Imports nsmap und WD_SECTION_START entfernt; keine Funktionsänderung
 Erweiterung der LK Tabelle um S, S2, K, K2 und Belastung
 Leere Seite am Ende entfernt
 Zellen in Tabelle zentriert
@@ -26,8 +28,6 @@ try:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-    from docx.oxml.ns import nsmap
-    from docx.enum.section import WD_SECTION_START, WD_ORIENT
 except ImportError:
     print("Fehlendes Paket: python-docx. Bitte installieren mit: pip install python-docx")
     sys.exit(1)
@@ -296,23 +296,13 @@ def build_statistics(rows, teachers_map=None):
     }
     return stats
 
-def _set_section_orientation(section, landscape=False):
-    # Setzt Ausrichtung und gleicht Höhe/Breite an
-    if landscape:
-        section.orientation = WD_ORIENT.LANDSCAPE
-        new_width, new_height = section.page_height, section.page_width
-    else:
-        section.orientation = WD_ORIENT.PORTRAIT
-        new_width, new_height = section.page_width, section.page_height
-    section.page_width = new_width
-    section.page_height = new_height
-
-def build_doc(stats, title, source_name):
+def build_doc(stats, title, source_name=None):
     doc = Document()
 
     # Titel
     add_heading(doc, title, level=0)
-    #add_paragraph(doc, f"Quelle: {source_name}", italic=True)
+    if source_name:
+        add_paragraph(doc, f"Quelle: {Path(source_name).name}", italic=True)
     add_paragraph(doc, f"Erstellt am: {datetime.now().strftime('%d.%m.%Y %H:%M')}", italic=True)
     doc.add_paragraph()
 
