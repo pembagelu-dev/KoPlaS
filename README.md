@@ -71,11 +71,14 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.7 (Build 14.49.39)**
+**Aktuelle Version: 1.2.8 (Build 14.49.39)**
 
-Das Report-Modul trägt Version **0.3 Build 9**. Der CLI-Report nennt die Quelldatei im Dokument; die GUI zeigt keinen künstlichen Quellen-Platzhalter. Eine ungenutzte Ausrichtungsfunktion wurde entfernt.
+### Version 1.2.8
 
-Das ASV-Importmodul trägt Version **0.1 Build 5**. Wiederholt erzeugte CSV-Helfer wurden aus Zeilenschleifen verschoben und ungenutzte Werte entfernt; die Importformate und Rückgabedaten bleiben unverändert.
+- Summenzeile im Lehrkräfte-Dialog bündig ausgerichtet, Werte zentriert und Lehrkraft-/UPZ-Zellen zur Beschriftung „Summe“ verbunden.
+- Erfolgreiche Lehrkräfte- und Kursimporte werden als Planänderung erkannt und führen beim Beenden zur Speicherabfrage.
+- Report-Modul (0.3 Build 9): ungenutzte Ausrichtungsfunktion und Imports entfernt; der CLI-Report nennt die Quelldatei, der GUI-Report keinen Platzhalter.
+- ASV-Importmodul (0.1 Build 5): ungenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen verschoben und Zahlenkonvertierung gezielter abgesichert.
 
 ### Version 1.2.7
 

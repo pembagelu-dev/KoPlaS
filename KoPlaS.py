@@ -1,8 +1,14 @@
-Version = "1.2.7 (Build 14.49.39)"
+Version = "1.2.8 (Build 14.49.39)"
 """
 ----------
 ChangeLog
 ----------
+
+Version 1.2.8
+Summenzeile im TeachersDialog bündig ausgerichtet, Summenwerte zentriert und Lehrkraft-/UPZ-Zellen zu „Summe“ verbunden
+Erfolgreiche Lehrkräfte- und Kursimporte markieren den Plan als geändert und lösen beim Beenden die Speicherabfrage aus
+Report: Unbenutzte Ausrichtungsfunktion und Imports entfernt; CLI-Report gibt den Quelldateinamen aus, GUI-Report keinen Platzhalter
+ASV-Import: Unbenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen gezogen und Zahlenkonvertierung gezielter abgesichert
 
 Version 1.2.7
 Drei Exportvarianten für Plan (LK, SuS, Reinigungspersonal), Auswahldialog
@@ -35,7 +41,7 @@ Defaultwerte der Einstellungen angepasst
 Mehr Infos im Log
 Dateiname der aktuell geladenen Datei in der Statuszeile rechts
 Prüfungen im Parkplatz werden dort nun ohne Slotdaten (Woche, Tag, Slot, Uhrzeit) abgelegt. Verhindert sauber falsche Berechnungen beim Drop
-Summenzeile im TeachersDialog (optische Anpassung noch notwendig)
+Summenzeile im TeachersDialog ergänzt
 Speichern unter hinzugefügt
 
 Version 1.2
@@ -3359,6 +3365,8 @@ class MainWindow(QMainWindow):
                 self.dc.calculate_belastung()
             except Exception:
                 pass
+            # Importierte Lehrkräftedaten sind Bestandteil des Plans und müssen gespeichert werden.
+            self.dc._dirty = True
             self.dc.dataChanged.emit()
             self.on_teachers()
         except Exception as e:
@@ -3455,6 +3463,8 @@ class MainWindow(QMainWindow):
                 pass
     
             self.dc.status(f"{len(course_rows or [])} Kurse importiert")
+            # Importierte Kurs- und Lehrkräftedaten sind Bestandteil des Plans.
+            self.dc._dirty = True
             self.dc.dataChanged.emit()
             self.on_teachers()
         except Exception as e:
@@ -5157,6 +5167,17 @@ class TeachersDialog(QDialog):
     def _apply_summary_style(self):
         #Formatierung der Summenzeile: fette Schrift, leichter Hintergrund.
         try:
+            # Leeren Zeilenkopf anzeigen und dessen Breite an die Haupttabelle angleichen.
+            # So beginnen die Summenspalten an derselben horizontalen Position.
+            main_v_header = self.table.verticalHeader()
+            summary_v_header = self.summary_view.verticalHeader()
+            self.summary_model.setVerticalHeaderLabels([""])
+            summary_v_header.setVisible(not main_v_header.isHidden())
+            summary_v_header.setFixedWidth(main_v_header.width())
+            main_v_header.geometriesChanged.connect(
+                lambda: summary_v_header.setFixedWidth(main_v_header.width())
+            )
+
             # Schrift wie Standard, aber fett
             bold_font = QFont(self.table.font())
             bold_font.setBold(True)
@@ -5167,8 +5188,11 @@ class TeachersDialog(QDialog):
                     self.summary_model.setItem(0, c, it)
                 it.setEditable(False)
                 it.setFont(bold_font)
+                it.setTextAlignment(Qt.AlignCenter)
                 # Leichter grauer Hintergrund, nur dezent
                 it.setBackground(QColor(255, 255, 255))
+            self.summary_model.item(0, 0).setText("Summe")
+            self.summary_view.setSpan(0, 0, 1, 2)
             # Spaltenbreiten synchronisieren mit der Haupttabelle
             try:
                 for c in range(self.model.columnCount()):
@@ -5209,7 +5233,7 @@ class TeachersDialog(QDialog):
             sums = self._compute_sums()
             # Flle die Summary-Modellelemente:
             # Wir zeigen in den relevanten Spalten die Summen; andere Spalten leer oder passend beschriftet
-            labels = ["", "", str(sums.get("WS", 0)), str(sums.get("S", 0)), str(sums.get("S2", 0)), str(sums.get("K", 0)), str(sums.get("K2", 0)), ""]
+            labels = ["Summe", "", str(sums.get("WS", 0)), str(sums.get("S", 0)), str(sums.get("S2", 0)), str(sums.get("K", 0)), str(sums.get("K2", 0)), ""]
             for c, txt in enumerate(labels):
                 it = self.summary_model.item(0, c)
                 if it is None:
