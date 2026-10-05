@@ -7,6 +7,7 @@ ChangeLog
 Version 1.2.8
 Summenzeile im TeachersDialog bündig ausgerichtet, Summenwerte zentriert und Lehrkraft-/UPZ-Zellen zu „Summe“ verbunden
 Erfolgreiche Lehrkräfte- und Kursimporte markieren den Plan als geändert und lösen beim Beenden die Speicherabfrage aus
+Summen S/S2 und K/K2 gegen die eindeutige Schülerzahl geprüft und Abweichungen farblich markiert
 Report: Unbenutzte Ausrichtungsfunktion und Imports entfernt; CLI-Report gibt den Quelldateinamen aus, GUI-Report keinen Platzhalter
 ASV-Import: Unbenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen gezogen und Zahlenkonvertierung gezielter abgesichert
 
@@ -5203,6 +5204,7 @@ class TeachersDialog(QDialog):
             # Entferne Rahmen und Setze Fixed Height
             self.summary_view.setFrameStyle(1)
             self.summary_view.setShowGrid(False)
+            self._apply_summary_verification()
         except Exception:
             pass
 
@@ -5226,6 +5228,25 @@ class TeachersDialog(QDialog):
         except Exception:
             pass
         return sums
+
+    def _apply_summary_verification(self):
+        """Markiert Kurs-Summen grün, wenn sie zur eindeutigen Schülerzahl passen."""
+        students = set()
+        for exam in self.dc.exams or []:
+            student = (exam.Schueler or "").strip()
+            if student:
+                students.add(student)
+
+        sums = self._compute_sums()
+        checks = ((3, "S", 3), (4, "S2", 3), (5, "K", 2), (6, "K2", 2))
+        for column, key, divisor in checks:
+            total = sums[key]
+            matches = total % divisor == 0 and total // divisor == len(students)
+            item = self.summary_model.item(0, column)
+            if item is not None:
+                item.setBackground(
+                    QColor(220, 255, 220) if matches else QColor(255, 200, 200)
+                )
 
     def _update_summaries(self):
         #Aktualisiert die Summenzeile (S, S2, K, K2). Wird bei dc.dataChanged und nach Item-Änderungen aufgerufen.
@@ -5253,6 +5274,8 @@ class TeachersDialog(QDialog):
                     self.summary_view.setColumnWidth(c, w)
             except Exception:
                 pass
+            # _update_summaries setzt Zellhintergründe zurück; Verifikation danach erneut anwenden.
+            self._apply_summary_verification()
             # Force repaint
             self.summary_view.viewport().update()
         except Exception:
