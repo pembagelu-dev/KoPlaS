@@ -7,9 +7,10 @@ ChangeLog
 Version 1.2.8
 Summenzeile im TeachersDialog bündig ausgerichtet, Summenwerte zentriert und Lehrkraft-/UPZ-Zellen zu „Summe“ verbunden
 Erfolgreiche Lehrkräfte- und Kursimporte markieren den Plan als geändert und lösen beim Beenden die Speicherabfrage aus
+L-Sportkurse werden vor dem Import zur FTU-Auswahl angezeigt; S/K zählen nur für ausgewählte Kurse
 Summen S/S2 und K/K2 gegen die eindeutige Schülerzahl geprüft und Abweichungen farblich markiert
 Report: Unbenutzte Ausrichtungsfunktion und Imports entfernt; CLI-Report gibt den Quelldateinamen aus, GUI-Report keinen Platzhalter
-ASV-Import: Unbenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen gezogen und Zahlenkonvertierung gezielter abgesichert
+ASV-Import: CSV-Helfer/Zahlenkonvertierung bereinigt; L-Sportkurse zur FTU-Auswahl, WS bei exakt gleichen Kursbezeichnungen einmalig
 
 Version 1.2.7
 Drei Exportvarianten für Plan (LK, SuS, Reinigungspersonal), Auswahldialog
@@ -141,10 +142,11 @@ from PySide6.QtGui import (
     QKeySequence, QAction, QFont, QColor, QPainter, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
 )
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView,
     QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QSpinBox, QDoubleSpinBox,
     QTimeEdit, QDateEdit, QFormLayout, QCheckBox, QPlainTextEdit, QStatusBar, QMenuBar,
-    QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QHeaderView, QPushButton, QMenu, QTextEdit, QInputDialog
+    QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QHeaderView, QPushButton, QMenu, QTextEdit,
+    QInputDialog, QListWidget, QListWidgetItem
 )
 
 import re
@@ -3399,7 +3401,90 @@ class MainWindow(QMainWindow):
                 self.dc.status(f"{len(course_rows or [])} Kurse importiert")
                 self.on_teachers()
                 return
- 
+
+            # Bei L-Sportkursen zählen S/K nur für die vom Nutzer ausgewählten FTU-Kurse.
+            l_sport_courses = [
+                row for row in course_rows
+                if "sport" in (row.get("Fach") or "").casefold()
+                and row.get("Kennzeichen") == "L"
+            ]
+            selected_source_rows = set()
+            if l_sport_courses:
+                dialog = QDialog(self)
+                dialog.setWindowTitle("FTU-Sportkurse auswählen")
+                dialog_layout = QVBoxLayout(dialog)
+                dialog_layout.addWidget(QLabel(
+                    "Wählen Sie die Sportkurse aus, die den Theorieunterricht (FTU) enthalten. "
+                    "Nur deren S-/K-Werte werden berücksichtigt."
+                ))
+
+                lists_layout = QHBoxLayout()
+                left_layout = QVBoxLayout()
+                left_layout.addWidget(QLabel("Gefundene Sportkurse (L)"))
+                left_list = QListWidget(dialog)
+                left_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+                left_layout.addWidget(left_list)
+                lists_layout.addLayout(left_layout)
+
+                arrows_layout = QVBoxLayout()
+                arrows_layout.addStretch(1)
+                move_right = QPushButton(">", dialog)
+                move_left = QPushButton("<", dialog)
+                arrows_layout.addWidget(move_right)
+                arrows_layout.addWidget(move_left)
+                arrows_layout.addStretch(1)
+                lists_layout.addLayout(arrows_layout)
+
+                right_layout = QVBoxLayout()
+                right_layout.addWidget(QLabel("FTU-Kurse"))
+                right_list = QListWidget(dialog)
+                right_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+                right_layout.addWidget(right_list)
+                lists_layout.addLayout(right_layout)
+                dialog_layout.addLayout(lists_layout)
+
+                for row in l_sport_courses:
+                    item_text = (
+                        f"{row.get('Kurs', '')} — LK {row.get('Lehrkraft', '')} — "
+                        f"{row.get('WS', 0)} Std."
+                    )
+                    item = QListWidgetItem(item_text)
+                    item.setData(Qt.ItemDataRole.UserRole, row.get("source_row"))
+                    left_list.addItem(item)
+
+                buttons = QDialogButtonBox(
+                    QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+                    parent=dialog,
+                )
+                ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+                ok_button.setEnabled(False)
+                dialog_layout.addWidget(buttons)
+
+                def move_selected(source: QListWidget, destination: QListWidget) -> None:
+                    for item in source.selectedItems():
+                        moved = QListWidgetItem(item.text())
+                        moved.setData(Qt.ItemDataRole.UserRole, item.data(Qt.ItemDataRole.UserRole))
+                        destination.addItem(moved)
+                        source.takeItem(source.row(item))
+                    ok_button.setEnabled(right_list.count() > 0)
+
+                move_right.clicked.connect(lambda: move_selected(left_list, right_list))
+                move_left.clicked.connect(lambda: move_selected(right_list, left_list))
+                buttons.accepted.connect(dialog.accept)
+                buttons.rejected.connect(dialog.reject)
+
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+
+                selected_source_rows = {
+                    right_list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(right_list.count())
+                }
+                for row in l_sport_courses:
+                    if row.get("source_row") not in selected_source_rows:
+                        row["S"] = 0
+                        row["K"] = 0
+
             by_code: Dict[str, Teacher] = {}
             for t in getattr(self.dc, "teachers", []):
                 code = (t.Lehrkraft or "").strip()

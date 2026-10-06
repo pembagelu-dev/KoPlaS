@@ -77,6 +77,7 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 - Summenzeile im Lehrkräfte-Dialog bündig ausgerichtet, Werte zentriert und Lehrkraft-/UPZ-Zellen zur Beschriftung „Summe“ verbunden.
 - Erfolgreiche Lehrkräfte- und Kursimporte werden als Planänderung erkannt und führen beim Beenden zur Speicherabfrage.
+- Beim Kursimport können die FTU-Kurse unter den L-Sportkursen ausgewählt werden; nur diese liefern S-/K-Werte. Wochenstunden werden je exakt geschriebener Kursbezeichnung nur einmal angerechnet; Groß-/Kleinschreibung bleibt relevant.
 - Summen in S/S2 und K/K2 werden durch Division mit 3 bzw. 2 gegen die Zahl eindeutiger Schüler geprüft; Abweichungen werden rot, passende Werte grün markiert. Die Markierung bleibt nach Aktualisierungen erhalten.
 - Report-Modul (0.3 Build 9): ungenutzte Ausrichtungsfunktion und Imports entfernt; der CLI-Report nennt die Quelldatei, der GUI-Report keinen Platzhalter.
 - ASV-Importmodul (0.1 Build 5): ungenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen verschoben und Zahlenkonvertierung gezielter abgesichert.

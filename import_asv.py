@@ -10,7 +10,8 @@ Build 5: Unbenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen gezogen und Z
 Import der Prüfungen aus ASV
 Import der Lehrkräfte der Schule (Kürzel) mit UPZ für Belastungsrechnung
 Import der Oberstufenkurse mit WS, Teilnehmer in S und K sowie LF-Kürzel als Zuordnung
-Doppelter Import S und K LF Sport behoben
+Fach, L-Kennzeichen und CSV-Quellzeile zur gezielten FTU-Auswahl bereitgestellt
+WS bei exakt gleichen Kursbezeichnungen nur beim ersten Auftreten vergeben; Groß-/Kleinschreibung bleibt relevant
 Kursnummer bei Sport (3SMW1 wurde zu 3SMW) behoben
 """
 
@@ -323,11 +324,10 @@ def read_teachers_asv(input_path: str) -> List[Dict[str, str]]:
 def read_courses(input_path: str) -> List[Dict[str, Any]]:
     #Liest Oberstufenkurse aus einer CSV mit Metadaten-Headern (wiederkehrend).
     #- school_name: aus der ALLERERSTEN Zeile, direkt der Text hinter 'NNNN - ' (z. B. '0306 - Meine Schule' -> 'Meine Schule')
-    #- Relevante Spalten anhand Header: 'Std.', 'LK', 'S', 'K', 'Kurs' (Groß/Kleinschreibung und Punkt wie im Beispiel)
+    #- Relevante Spalten anhand Header: 'Kurs', 'Fach', 'Std.', 'LK', 'S', 'K'; das Kennzeichen steht vor 'Std.'
     #Es können viele irrelevante/leer Spalten dazwischen liegen; wir suchen positionsunabhängig nach den Header-Strings.
     #- Zwischenheader/Seitenköpfe werden ignoriert (z. B. Zeilen, die keine Daten tragen oder wieder Headerzeilen darstellen).
-    #Rückgabe pro Kurszeile: Dict mit Keys:
-    #{"Lehrkraft": <LK>, "S": <int>, "K": <int>, "WS": <int>, "school_name": <str>}
+    #Rückgabe pro Kurszeile inklusive Kurs/Fach/Kennzeichen und Quellzeile.
     
     results: List[Dict[str, Any]] = []
     def parse_school_name(s: str) -> str:
@@ -356,7 +356,10 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
     #   merken wir uns deren Spaltenindizes (positionsunabhängig).
     # - Danach folgende Zeilen bis zum nächsten Leer-/Zwischenheader als Datenzeilen lesen,
     #   solange an den relevanten Indizes plausible Werte stehen.
-    hdr_idx = {"Std.": None, "LK": None, "S": None, "K": None, "Kurs": None}  # wir benötigen LK, Std.(->WS), S, K, Kurs
+    hdr_idx = {
+        "Std.": None, "LK": None, "S": None, "K": None, "Kurs": None,
+        "Fach": None, "Kennzeichen": None,
+    }
 
     def find_indices(header_row: List[str]) -> Dict[str, Optional[int]]:
         # Suche nach den gesuchten Überschriften (exakt oder getrimmt)
@@ -388,8 +391,9 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
 
     parsing = False
     current_idx = hdr_idx.copy()
+    seen_course_names = set()
 
-    for r in rows:
+    for source_row, r in enumerate(rows, start=1):
         # Zwischenheader/Seitenköpfe ignorieren:
         # - komplett leere Zeilen
         # - offensichtliche Seitenangaben wie "Seite", "Kursübersicht" als erste sinnvolle Tokens
@@ -404,6 +408,8 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
         # Header-Zeile erkennen
         if is_header_row(r):
             current_idx = find_indices(r)
+            std_idx = current_idx.get("Std.")
+            current_idx["Kennzeichen"] = std_idx - 1 if std_idx is not None and std_idx > 0 else None
             parsing = True
             continue
 
@@ -417,157 +423,36 @@ def read_courses(input_path: str) -> List[Dict[str, Any]]:
         s_txt = safe_get(r, current_idx.get("S")).strip()
         k_txt = safe_get(r, current_idx.get("K")).strip()
         kurs = safe_get(r, current_idx.get("Kurs")).strip()
+        fach = safe_get(r, current_idx.get("Fach")).strip()
+        kennzeichen = safe_get(r, current_idx.get("Kennzeichen")).strip()
 
         # Ggf. trivialer Filter: ohne Kürzel keine Kurszeile
         if lk == "":
             continue
 
+        # Kursbezeichnungen gelten exakt und mit Beachtung der Groß-/Kleinschreibung.
+        # Wiederholte Kennungen (auch mit abweichendem Kennzeichen) erhalten WS nur beim ersten Auftreten.
+        ws = to_int(ws_txt)
+        if kurs:
+            if kurs in seen_course_names:
+                ws = 0
+            else:
+                seen_course_names.add(kurs)
+
         rec = {
             "Lehrkraft": lk,
-            "WS": to_int(ws_txt),  # 'Std.' -> 'WS'
+            "WS": ws,  # 'Std.' -> 'WS'
             "S": to_int(s_txt),
             "K": to_int(k_txt),
             "school_name": school_name,
             "Kurs": kurs,
+            "Fach": fach,
+            "Kennzeichen": kennzeichen,
+            "source_row": source_row,
         }        
         results.append(rec)
 
-    # --- Konsolidierung von SMW/smw-Kurs-Paaren pro Lehrkraft ---
-    #
-    # Regeln:
-    # - Paare sind identisch bis auf Groß-/Kleinschreibung der Zeichenfolge "SMW"/"smw" im Kurs (z. B. "3SMW1" vs "3smw1").
-    # - Pro Lehrkraft maximal ein SMW- und ein smw-Eintrag für dasselbe Paar.
-    # - Konsolidierung: WS = Summe(WS beider Zeilen), S/K stammen ausschließlich aus der SMW-Zeile.
-    # - Nur anwenden für echte SMW/smw-Paare; ansonsten Datensätze unverändert übernehmen.
-    #
-    # Vorgehen:
-    # - Schlüssel je Datensatz zur Paarbildung: (Lehrkraft, normalisierte Kurskennung), wobei
-    #   normalisierte Kurskennung = Kurs mit ersetztem "smw"/"SMW" zu einem einheitlichen Token, z. B. "__SMW__".
-    # - Pro Schlüssel sammeln wir "upper" (enthält 'SMW' in Großbuchstaben) und "lower" (enthält 'smw' in Kleinbuchstaben).
-    # - Wenn upper und lower vorhanden -> zusammenführen gemäß Regeln.
-    # - Wenn nur upper oder nur lower vorhanden -> nur übernehmen, aber:
-    #     - Wenn nur lower existiert, S/K aus der lower-Zeile übernehmen (da keine SMW-Zeile existiert).
-    #
-    from collections import defaultdict
-    import re
-
-    def _has_smw(s: str) -> bool:
-        # robuste, case-insensitive Erkennung von SMW/smw
-        return bool(re.search(r'smw', (s or ''), flags=re.IGNORECASE))
-
-    def _normalize_smw_token_with_num(kurs_value: str) -> tuple[str, str]:
-        """
-        Liefert einen Normalisierungs-Schlüssel inkl. extrahierter Endziffer.
-        key: Lehrkraft-übergreifend identisch für gleiche Kurs-Variante (SMW/smw vereinheitlicht)
-        num: extrahierte Abschlussziffer (falls vorhanden), sonst ''.
-        Beispiele:
-          "3SMW1" -> ("3__SMW__1", "1")
-          "3smw1" -> ("3__SMW__1", "1")
-          "3SMW"  -> ("3__SMW__", "")
-        """
-        s = (kurs_value or "").strip()
-        # SMW/smw vereinheitlichen
-        base = re.sub(r'smw', '__SMW__', s, flags=re.IGNORECASE)
-        # Endziffer extrahieren
-        m = re.search(r'(\d)$', base)
-        num = m.group(1) if m else ''
-        return base, num
-
-    def _ends_with_digit(s: str) -> bool:
-        return bool(re.search(r'\d$', (s or '').strip()))
-
-    def _ensure_digit_suffix(course: str, fallback_digit: str) -> str:
-        
-        #Stellt sicher, dass der Kursstring mit einer Ziffer endet.
-        #Falls nicht und fallback_digit gesetzt ist, wird diese angehängt.
-        
-        c = (course or '').strip()
-        if _ends_with_digit(c) or not fallback_digit:
-            return c
-        return f"{c}{fallback_digit}"
-
-    def _pick_course(upper_course: str, lower_course: str, fallback_digit: str) -> str:
-        # Wählt die robusteste Kursbezeichnung und stellt sicher, dass die Endziffer vorhanden ist.
-        u = (upper_course or '').strip()
-        l = (lower_course or '').strip()
-        if not u and not l:
-            return _ensure_digit_suffix('', fallback_digit)
-        if not u:
-            return _ensure_digit_suffix(l, fallback_digit)
-        if not l:
-            return _ensure_digit_suffix(u, fallback_digit)
-        # identisch bis auf Case
-        if u.lower() == l.lower():
-            return _ensure_digit_suffix(u, fallback_digit)
-        # Bevorzuge Variante, die mit Ziffer endet
-        eu, el = _ends_with_digit(u), _ends_with_digit(l)
-        if eu and not el:
-            return u
-        if el and not eu:
-            return l
-        # sonst längere Variante
-        chosen = u if len(u) >= len(l) else l
-        return _ensure_digit_suffix(chosen, fallback_digit)
-
-    buckets: Dict[tuple, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(lambda: {"upper": None, "lower": None})
-    others: List[Dict[str, Any]] = []
-
-    # Zuerst in SMW/smw-Buckets und "others" einsortieren
-    for rec in results:
-        # trims für Robustheit
-        rec["Kurs"] = (rec.get("Kurs") or "").strip()
-        kurs_val = rec["Kurs"]
-        lk_val = (rec.get("Lehrkraft") or "").strip()
-        if _has_smw(kurs_val):
-            norm, _ = _normalize_smw_token_with_num(kurs_val)
-            key = (lk_val, norm)
-            # nach Groß-/Kleinschreibung vorsortieren (für S/K-Quelle bleibt 'upper' maßgeblich)
-            if re.search(r'SMW', kurs_val):
-                buckets[key]["upper"] = rec
-            elif re.search(r'smw', kurs_val):
-                buckets[key]["lower"] = rec
-            else:
-                # gemischte Schreibweise: als 'upper' behandeln
-                buckets[key]["upper"] = rec
-        else:
-            # Nicht betroffen von SMW/smw-Regeln -> direkt übernehmen
-            others.append(rec)
-
-    consolidated: List[Dict[str, Any]] = []
-
-    # Konsolidierung der SMW/smw-Paare
-    for (lk_val, norm_kurs), pair in buckets.items():
-        upper = pair.get("upper")
-        lower = pair.get("lower")
-        # Die erwartete Endziffer aus dem normalisierten Schlüssel ableiten (falls vorhanden)
-        _ , digit_fallback = _normalize_smw_token_with_num(norm_kurs)
-        if upper and lower:
-            # Zusammenführen nach Regeln
-            merged = {
-                "Lehrkraft": lk_val,
-                "WS": int(upper.get("WS", 0)) + int(lower.get("WS", 0)),
-                "S": int(upper.get("S", 0)),  # ausschließlich aus SMW (upper)
-                "K": int(upper.get("K", 0)),  # ausschließlich aus SMW (upper)
-                "school_name": upper.get("school_name", "") or lower.get("school_name", ""),
-                # Kurs-Bezeichnung robust wählen und Endziffer sicherstellen
-                "Kurs": _pick_course(upper.get("Kurs", ""), lower.get("Kurs", ""), digit_fallback),
-            }
-            consolidated.append(merged)
-        elif upper and not lower:
-            # Nur SMW vorhanden -> unverändert übernehmen
-            upper["Kurs"] = _ensure_digit_suffix((upper.get("Kurs") or '').strip(),
-                                                 _normalize_smw_token_with_num(upper.get("Kurs") or '')[1])
-            consolidated.append(upper)
-        elif lower and not upper:
-            # Nur smw vorhanden -> übernehmen, S/K aus dieser Zeile (keine SMW-Zeile vorhanden)
-            lower["Kurs"] = _ensure_digit_suffix((lower.get("Kurs") or '').strip(),
-                                                 _normalize_smw_token_with_num(lower.get("Kurs") or '')[1])
-            consolidated.append(lower)
-        # Falls weder upper noch lower (sollte nicht vorkommen), nichts tun
-    # Andere Kurse anhängen
-    consolidated.extend(others)
-
-    return consolidated
+    return results
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
