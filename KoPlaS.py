@@ -1,8 +1,11 @@
-Version = "1.2.8 (Build 43)"
+Version = "1.2.9 (Build 44)"
 """
 ----------
 ChangeLog
 ----------
+
+Version 1.2.9 (Build 44)
+Solver: Harte Begrenzung der maximalen Einsatztage pro Person zählt Prüfer- und Beisitzertätigkeiten rollenübergreifend; leere Beisitzer werden dabei ignoriert.
 
 Version 1.2.8
 ExamsDialog: Tab bestätigt Zelländerungen und öffnet dieselbe editierbare Spalte in der nächsten Zeile

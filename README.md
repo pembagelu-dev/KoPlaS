@@ -57,7 +57,7 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 | Datei | Aufgabe |
 | --- | --- |
 | `KoPlaS.py` | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
-| `kolloPlaner.py` | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
+| `kolloPlaner.py` (0.2 Build 13) | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
 | `import_asv.py` (0.1 Build 5) | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
 | `export.py` (0.1 Build 11) | Erzeugung der Word-Pläne und Excel-Tabellen |
 | `report.py` (0.3 Build 9) | Erstellung des Word-Statistik- und Belastungsreports |
@@ -71,7 +71,12 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.8 (Build 14.49.43)**
+**Aktuelle Version: 1.2.9 (Build 44)**
+
+### Version 1.2.9
+
+- Harte Begrenzung der maximalen Einsatztage zählt Lehrkräfte über Prüfer- und Beisitzerrolle hinweg. Der Solver erkennt belegte Personentage jetzt exakt; leere Beisitzer werden nicht als gemeinsame Person gezählt.
+- Geprüft: Solverfälle für rollenübergreifende Tagesgrenzen, leere Beisitzer und deaktivierte Tagesgrenze; GUI-Solver-Schnittstelle und Live-Konfliktanzeige; Syntax und Modulimporte; ASV-Prüfungsimport.
 
 ### Version 1.2.8
 

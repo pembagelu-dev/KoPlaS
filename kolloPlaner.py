@@ -1,9 +1,10 @@
-Version = "0.2 (Build 12)"
+Version = "0.2 (Build 13)"
 
 """
 ----------
 ChangeLog
 ----------
+Build 13: Harte Begrenzung der Einsatztage bildet belegte Personentage exakt ab; leere Beisitzer erzeugen keine künstliche Person.
 Effizienz: b-Vektoren (Belegungen je Prüfer/Tag/Slot) einmalig erzeugen und in hart/weich gemeinsam nutzen
 Effizienz: Caching von slotweisen Summen pro (Prüfer, Tag, Slot), keine redundanten Summierungen
 Harte Lückenregel bleibt möglich, aber effizienter (gemeinsame b-Vektoren); weiche Doppelstrafe reduziert, wenn hart aktiv
@@ -474,16 +475,26 @@ class ColloquiumScheduler:
             Kmax = self.config.hard_max_days_per_teacher_K
             exams_by_person = defaultdict(list)
             for e in self.exams:
-                exams_by_person[e.pruefer].append(e)
-                exams_by_person[e.beisitzer].append(e)
+                # Wie in KoPlaS.evaluate_conflicts: Personen werden rollenübergreifend
+                # gezählt, leere Beisitzer sind aber keine eigene Person.
+                if e.pruefer:
+                    exams_by_person[e.pruefer].append(e)
+                beisitzer = (e.beisitzer or "").strip()
+                if beisitzer:
+                    exams_by_person[beisitzer].append(e)
 
             for person, exs in exams_by_person.items():
                 day_used_vars = []
                 for (w, d), day_slots in self.day_to_gslots.items():
                     used = self.model.NewBoolVar(f"tday_{person}_w{w}d{d}")
+                    occupied = []
                     for e in exs:
                         for gslot in day_slots:
-                            self.model.Add(self.x[(e.idx, gslot)] <= used)
+                            occupied.append(self.x[(e.idx, gslot)])
+                    # Exakte Äquivalenz: used ist 1 genau dann, wenn mindestens
+                    # eine Prüfung dieser Person an diesem Tag liegt. Nur die
+                    # Richtung x <= used ließ den Solver used immer auf 0 setzen.
+                    self.model.AddMaxEquality(used, occupied)
                     day_used_vars.append(used)
                 self.model.Add(sum(day_used_vars) <= Kmax)
 
