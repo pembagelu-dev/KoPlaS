@@ -59,7 +59,7 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 | `KoPlaS.py` | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
 | `kolloPlaner.py` | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
 | `import_asv.py` (0.1 Build 5) | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
-| `export.py` | Erzeugung der Word-Pläne und Excel-Tabellen |
+| `export.py` (0.1 Build 11) | Erzeugung der Word-Pläne und Excel-Tabellen |
 | `report.py` (0.3 Build 9) | Erstellung des Word-Statistik- und Belastungsreports |
 
 ## Hinweise
@@ -71,10 +71,17 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.8 (Build 14.49.39)**
+**Aktuelle Version: 1.2.8 (Build 14.49.42)**
 
 ### Version 1.2.8
 
+- Word-Exporte passen Schülernamen samt NTA-Zeit an die feste Slotbreite an; lange zusammengesetzte Nachnamen werden bei Bedarf abgekürzt.
+- Fehler beim Parken von Prüfungsblöcken behoben: Der Undo-Zustand greift sicher auf die optional dynamisch berechnete Uhrzeit zu.
+- Prüfungs-, Lehrkräfte- und Kursimporte ersetzen jeweils ihre eigene Datenquelle. Die Lehrkräfteliste wird aus den getrennten Quellen und den Prüfungsbeteiligten neu aufgebaut; K2 und Belastung werden aktualisiert. Ein Import funktioniert weiterhin einzeln, und der Solver benötigt nur Prüfungsdaten.
+- Bei einer bestehenden Planung fragt jeder CSV-Import vor dem Übernehmen nach. Bei Zustimmung werden Plan, ID-bezogene Markierungen und Undo/Redo-Historie gelöscht; bei Abbruch oder ungültigen CSV-Daten bleibt der bisherige Stand erhalten. Planungs- und Solver-Einstellungen bleiben bestehen.
+- Importe sind während eines laufenden Solverdurchlaufs gesperrt; parallele Solverläufe werden verhindert.
+- Quelldaten werden in gespeicherten Plänen mitgeführt. Veraltete Lehrkraftkürzel in Bedingungen bleiben erhalten und werden nach einem Import in der Statusmeldung angezeigt.
+- Belastungseinstellungen bleiben beim Speichern und erneuten Öffnen eines Plans erhalten.
 - Summenzeile im Lehrkräfte-Dialog bündig ausgerichtet, Werte zentriert und Lehrkraft-/UPZ-Zellen zur Beschriftung „Summe“ verbunden.
 - Erfolgreiche Lehrkräfte- und Kursimporte werden als Planänderung erkannt und führen beim Beenden zur Speicherabfrage.
 - Beim Kursimport können die FTU-Kurse unter den L-Sportkursen ausgewählt werden; nur diese liefern S-/K-Werte. Wochenstunden werden je exakt geschriebener Kursbezeichnung nur einmal angerechnet; Groß-/Kleinschreibung bleibt relevant.

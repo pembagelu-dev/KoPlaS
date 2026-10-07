@@ -1,4 +1,4 @@
-Version = "0.3 Build 9"
+Version = "0.3 (Build 9)"
 
 """
 Reportschnittstelle

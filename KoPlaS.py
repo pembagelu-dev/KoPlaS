@@ -1,10 +1,15 @@
-Version = "1.2.8 (Build 14.49.39)"
+Version = "1.2.8 (Build 42)"
 """
 ----------
 ChangeLog
 ----------
 
 Version 1.2.8
+Word-Exporte: Slotnamen und NTA-Zeiten werden anhand der Arial-Breite auf einzeilige Zellen skaliert; lange zusammengesetzte Nachnamen werden bei Bedarf sinnvoll abgekürzt
+Fehler beim Parken eines Prüfungsblocks behoben: Undo-Zustände lesen die dynamisch berechnete Uhrzeit optional
+Importe transaktional: Planlöschung nach Bestätigung, getrennte Lehrkräfte-/Kursquellen, abgeleitete K2-/Belastungswerte und veraltete Plan-/Undo-Referenzen konsistent aktualisiert; Solver weiterhin ohne Kurs-/Lehrkräfteimport nutzbar
+Import und Solverlauf können nicht parallel Datenstände verändern
+Belastungseinstellungen werden beim Laden gespeicherter Pläne wiederhergestellt
 Summenzeile im TeachersDialog bündig ausgerichtet, Summenwerte zentriert und Lehrkraft-/UPZ-Zellen zu „Summe“ verbunden
 Erfolgreiche Lehrkräfte- und Kursimporte markieren den Plan als geändert und lösen beim Beenden die Speicherabfrage aus
 L-Sportkurse werden vor dem Import zur FTU-Auswahl angezeigt; S/K zählen nur für ausgewählte Kurse
@@ -482,6 +487,12 @@ class EditTeacherFieldCommand(BaseCommand):
                     break
         if t:
             self._set_field(t, val)
+            if self.field_name == "WS":
+                course_values = dict(dc.course_source.get(self.teacher_code, {}))
+                course_values["WS"] = str(val) if val is not None else ""
+                course_values.setdefault("S", "")
+                course_values.setdefault("K", "")
+                dc.course_source[self.teacher_code] = course_values
             # Nachfassen: Belastung neu
             try:
                 dc.calculate_belastung()
@@ -644,6 +655,9 @@ class DataController(QObject):
             self.settings.students_note_text = ""
         self.schedule: List[ScheduleItem] = []
         self.teachers: List[Teacher] = []
+        # Getrennte Quellen erlauben Einzelimporte, ohne Werte anderer CSVs zu verlieren.
+        self.teacher_roster_source: Dict[str, str] = {}
+        self.course_source: Dict[str, Dict[str, str]] = {}
         # schneller Index nach Kürzel (Lehrkraft) -> Teacher
         self.teacher_by_code: Dict[str, Teacher] = {}
         # Metadaten
@@ -711,7 +725,7 @@ class DataController(QObject):
     def clear_highlight(self):
         self.highlight_mode, self.highlight_value = None, None
     
-    def count_beisitzer(self):
+    def count_beisitzer(self, emit: bool = True):
         """
         Zählt für jede Lehrkraft (identifiziert über Teacher.Lehrkraft) die Anzahl
         der Beisitzertätigkeiten über alle dc.exams und schreibt das Ergebnis
@@ -744,13 +758,12 @@ class DataController(QObject):
             else:
                 # Kein gültiger Code in counts -> leer lassen
                 t.K2 = ""
-        # Änderungen signalisieren
-        self.dataChanged.emit()
+        if emit:
+            self.dataChanged.emit()
 
-    def calculate_belastung(self):
+    def _calculate_teacher_burdens(self, teachers: List[Teacher]):
         """
-        Berechnet die Belastung je Lehrkraft anhand der Konstanten und schreibt
-        das Ergebnis als String (mit 2 Nachkommastellen) in Teacher.Belastung.
+        Berechnet Belastungswerte für die übergebene Lehrkräfteliste.
         Interne Konvertierung:
         - UPZ kommt als '12.0' -> es wird die Ganzzahl vor dem Punkt verwendet (12).
         - WS, S, S2, K, K2 kommen als Strings natürlicher Zahlen -> int-Parsing; leere Strings -> 0.
@@ -776,7 +789,7 @@ class DataController(QObject):
             except Exception:
                 return 0
 
-        for t in getattr(self, "teachers", []) or []:
+        for t in teachers or []:
             upz_i = parse_upz_int(t.UPZ)*60
             ws_i  = to_int_safe(t.WS)
             s_i   = to_int_safe(t.S)
@@ -800,8 +813,100 @@ class DataController(QObject):
                 t.Belastung = f"{belastung_val:.2f}"
             except Exception:
                 t.Belastung = "0.00"
-        # Änderungen signalisieren
+
+    def calculate_belastung(self, emit: bool = True):
+        """Aktualisiert Belastungswerte und benachrichtigt bei Bedarf die Oberfläche."""
+        self._calculate_teacher_burdens(getattr(self, "teachers", []) or [])
+        if emit:
+            self.dataChanged.emit()
+
+    def _teachers_from_import_sources(
+        self,
+        exams: List[Exam],
+        roster: Dict[str, str],
+        courses: Dict[str, Dict[str, str]],
+    ) -> List[Teacher]:
+        """Baut den verbundenen Lehrkräftebestand samt prüfungsbezogenen Werten auf."""
+        previous = {
+            (t.Lehrkraft or "").strip(): t
+            for t in (self.teachers or [])
+            if (t.Lehrkraft or "").strip()
+        }
+        exam_codes = {
+            code
+            for exam in exams or []
+            for code in ((exam.Pruefer or "").strip(), (exam.Beisitzer or "").strip())
+            if code
+        }
+        codes = set(roster) | set(courses) | exam_codes
+        assessor_counts: Dict[str, int] = {code: 0 for code in codes}
+        for exam in exams or []:
+            code = (exam.Beisitzer or "").strip()
+            if code in assessor_counts:
+                assessor_counts[code] += 1
+
+        teachers: List[Teacher] = []
+        for code in sorted(codes):
+            old = previous.get(code)
+            course_values = courses.get(code, {})
+            k2_count = assessor_counts.get(code, 0)
+            teachers.append(Teacher(
+                Lehrkraft=code,
+                UPZ=roster.get(code, ""),
+                WS=course_values.get("WS", ""),
+                S=course_values.get("S", ""),
+                S2=str(getattr(old, "S2", "") or ""),
+                K=course_values.get("K", ""),
+                K2=str(k2_count) if k2_count else "",
+                Belastung="",
+            ))
+        self._calculate_teacher_burdens(teachers)
+        return teachers
+
+    def commit_import(
+        self,
+        *,
+        exams: Optional[List[Exam]] = None,
+        teacher_roster: Optional[Dict[str, str]] = None,
+        courses: Optional[Dict[str, Dict[str, str]]] = None,
+        school_name: Optional[str] = None,
+        replace_school_name: bool = False,
+    ):
+        """Übernimmt einen vollständig vorbereiteten Import in einem UI-Schritt."""
+        next_exams = list(self.exams if exams is None else exams)
+        next_roster = dict(self.teacher_roster_source if teacher_roster is None else teacher_roster)
+        next_courses = {
+            code: dict(values)
+            for code, values in (self.course_source if courses is None else courses).items()
+        }
+        next_teachers = self._teachers_from_import_sources(next_exams, next_roster, next_courses)
+
+        # Erst nach erfolgreicher Vorbereitung den zusammenhängenden Stand übernehmen.
+        self.exams = next_exams
+        self.teacher_roster_source = next_roster
+        self.course_source = next_courses
+        self.teachers = next_teachers
+        if replace_school_name:
+            self.school_name = (school_name or "").strip() or None
+        self.schedule = []
+        self.conflict_map.clear()
+        self.fair_day_map.clear()
+        self.clear_highlight()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._rebuild_teacher_index()
+        self._dirty = True
         self.dataChanged.emit()
+        self.actionStateChanged.emit()
+        self.uiRefreshRequested.emit()
+
+    def stale_teacher_constraint_codes(self) -> Set[str]:
+        """Liefert gespeicherte Lehrkraftkürzel-Constraints ohne aktuelle Referenz."""
+        active_codes = set(self.teacher_by_code)
+        constraints = self.settings.constraints
+        unavailable = set((constraints.unavailability or {}).keys())
+        allowed_five = set(constraints.teachers_allow_5_per_day or [])
+        return (unavailable | allowed_five) - active_codes
 
     def _rebuild_teacher_index(self):
         """
@@ -890,18 +995,23 @@ class DataController(QObject):
         return f"Wiederholen: {cmd.label()}"
 
     # CSV Import
-    def import_csv(self, path: str):
+    def import_csv(self, path: str, confirm_plan_reset: Any = None) -> bool:
         try:
             exams = K.read_exams_from_csv(path)
-            self.exams = [Exam(
+            if not exams:
+                raise ValueError("Die CSV enthält keine importierbaren Prüfungen.")
+            prepared_exams = [Exam(
                 idx=e.idx, Schueler=e.schueler, Fach=e.fach,
                 Thema=e.thema, Pruefer=e.pruefer, Beisitzer=e.beisitzer
             ) for e in exams]
-            self.dataChanged.emit()
+            if self.schedule and (confirm_plan_reset is None or not confirm_plan_reset()):
+                return False
+            self.commit_import(exams=prepared_exams)
             self.status(f"{len(self.exams)} Prüfungen importiert")
-            self._dirty = True
+            return True
         except Exception as e:
             self.report_error("CSV-Import fehlgeschlagen", e)
+            return False
 
     # Speichern / Öffnen (.kolloPlan)
     def to_dict(self) -> Dict[str, Any]:
@@ -919,6 +1029,10 @@ class DataController(QObject):
             "settings": settings_obj,
             "schedule": sched_list,
             "teachers": teachers_list,
+            "teacher_roster_source": dict(self.teacher_roster_source),
+            "course_source": {
+                code: dict(values) for code, values in self.course_source.items()
+            },
             "school_name": self.school_name or "",
         }
 
@@ -943,7 +1057,18 @@ class DataController(QObject):
             cs = ConstraintsSettings(**c)
         except Exception:
             cs = ConstraintsSettings()
-        self.settings = AppSettings(rooms=s.get("rooms", [""]), prepare_room=prepare_room_val, time=ts, constraints=cs, students_note_text=s.get("students_note_text", ""))
+        self.settings = AppSettings(
+            rooms=s.get("rooms", [""]),
+            prepare_room=prepare_room_val,
+            time=ts,
+            constraints=cs,
+            workload_korrektur_min=s.get("workload_korrektur_min", 80),
+            workload_faktor_nachkorrektur=s.get("workload_faktor_nachkorrektur", 0.5),
+            workload_kolloq_pruefer_min=s.get("workload_kolloq_pruefer_min", 90),
+            workload_faktor_beisitzer=s.get("workload_faktor_beisitzer", 0.5),
+            workload_unterricht_aufwand_min=s.get("workload_unterricht_aufwand_min", 990),
+            students_note_text=s.get("students_note_text", ""),
+        )
         
         # Minimaler Fix: neu eingeführtes Feld sicher aus den Settings übernehmen
         try:
@@ -997,7 +1122,44 @@ class DataController(QObject):
                     K2=k2,
                     Belastung=bel
                 ))
-        # Index der Lehrkräfte aktualisieren
+        # Quelleinträge ergänzen ältere Pläne abwärtskompatibel aus dem bestehenden Lehrkräftemodell.
+        if "teacher_roster_source" in obj:
+            self.teacher_roster_source = {
+                str(code).strip(): str(upz or "").strip()
+                for code, upz in (obj.get("teacher_roster_source") or {}).items()
+                if str(code).strip()
+            }
+        else:
+            self.teacher_roster_source = {
+                str(teacher.Lehrkraft or "").strip(): str(teacher.UPZ or "").strip()
+                for teacher in self.teachers
+                if str(teacher.Lehrkraft or "").strip()
+                and str(teacher.UPZ or "").strip()
+            }
+        if "course_source" in obj:
+            self.course_source = {}
+            for code, values in (obj.get("course_source") or {}).items():
+                key = str(code).strip()
+                if key:
+                    values = values or {}
+                    self.course_source[key] = {
+                        field_name: str(values.get(field_name, "") or "").strip()
+                        for field_name in ("WS", "S", "K")
+                    }
+        else:
+            self.course_source = {
+                str(teacher.Lehrkraft or "").strip(): {
+                    "WS": str(teacher.WS or ""), "S": str(teacher.S or ""), "K": str(teacher.K or "")
+                }
+                for teacher in self.teachers
+                if str(teacher.Lehrkraft or "").strip()
+                and any(str(getattr(teacher, name, "") or "").strip() for name in ("WS", "S", "K"))
+            }
+
+        # Index und abgeleitete Lehrkräftedaten aus den geladenen Quellen aktualisieren.
+        self.teachers = self._teachers_from_import_sources(
+            self.exams, self.teacher_roster_source, self.course_source
+        )
         self._rebuild_teacher_index()
 
         # Schule (optional in älteren Dateien)
@@ -1964,7 +2126,7 @@ class RightModel(QAbstractTableModel):
                         if it.ExamIdx == exam_idx:
                             return {
                                 "Woche": it.Woche, "Tag": it.Tag, "SlotIndex": it.SlotIndex,
-                                "Uhrzeit": it.Uhrzeit, "Raum": it.Raum
+                                "Uhrzeit": getattr(it, "Uhrzeit", None), "Raum": it.Raum
                             }
                     # Nicht gefunden -> Parkplatz-Zustand
                     return {"Woche": None, "Tag": None, "SlotIndex": None, "Uhrzeit": None, "Raum": ""}
@@ -2539,7 +2701,7 @@ class ParkingModel(QAbstractTableModel):
                     if it.ExamIdx == exam_idx:
                         return {
                             "Woche": it.Woche, "Tag": it.Tag, "SlotIndex": it.SlotIndex,
-                            "Uhrzeit": it.Uhrzeit, "Raum": it.Raum
+                            "Uhrzeit": getattr(it, "Uhrzeit", None), "Raum": it.Raum
                         }
                 return {"Woche": None, "Tag": None, "SlotIndex": None, "Uhrzeit": None, "Raum": ""}
             before_state = find_item_state(self.dc, ex_idx)
@@ -2746,6 +2908,7 @@ class MainWindow(QMainWindow):
         self.showMaximized()
 
         self.dc = DataController()
+        self._solver_pending = False
         self.dc.logMessage.connect(self.on_log)
         self.dc.statusMessage.connect(self.on_status)
 
@@ -3047,6 +3210,43 @@ class MainWindow(QMainWindow):
         help_menu.addAction(act_feedback)
 
     # Menü-Handler
+    def _solver_is_running(self) -> bool:
+        if getattr(self, "_solver_pending", False):
+            return True
+        try:
+            return bool(self.thread and self.thread.isRunning())
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _allow_import_while_solver_idle(self) -> bool:
+        if not self._solver_is_running():
+            return True
+        QMessageBox.information(
+            self,
+            "Solver läuft",
+            "Während eines laufenden Planungsdurchlaufs können keine CSV-Daten importiert werden. Bitte warten Sie, bis der Solver beendet ist.",
+        )
+        return False
+
+    def _confirm_import_plan_reset(self, import_name: str) -> bool:
+        if not self.dc.schedule:
+            return True
+        return QMessageBox.question(
+            self,
+            "Bestehende Planung löschen?",
+            f"Für den Import {import_name} liegt bereits eine Planung mit {len(self.dc.schedule)} Einträgen vor.\n\n"
+            "Wenn Sie fortfahren, wird diese Planung einschließlich geparkter Prüfungen gelöscht. "
+            "Die Planungs- und Solver-Einstellungen bleiben erhalten. Möchten Sie fortfahren?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _status_with_stale_teacher_constraints(self, message: str):
+        stale = sorted(self.dc.stale_teacher_constraint_codes())
+        if stale:
+            message += " | Nicht aktuell verwendete Lehrkraftkürzel in Bedingungen bleiben gespeichert: " + ", ".join(stale)
+        self.dc.status(message)
+
     def on_open(self):
         # Qt-eigenen (nicht-nativen) Dialog erzwingen, damit Qt-Übersetzungen greifen
         dlg = QFileDialog(self, "Öffnen", WORK_DIR)
@@ -3155,6 +3355,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Fehler", str(e))
       
     def on_import(self):
+        if not self._allow_import_while_solver_idle():
+            return
         # Qt-eigenen (nicht-nativen) Dialog erzwingen
         start_dir = self.dc.last_csv_dir or ""
         dlg = QFileDialog(self, "Prüfungen-CSV wählen", start_dir)
@@ -3169,8 +3371,15 @@ class MainWindow(QMainWindow):
         fn = dlg.selectedFiles()[0]
     
         try:
-            self.dc.import_csv(fn)
+            imported = self.dc.import_csv(
+                fn,
+                confirm_plan_reset=lambda: self._confirm_import_plan_reset("der Prüfungsdaten"),
+            )
+            if not imported:
+                return
             self.dc.last_csv_dir = os.path.dirname(fn)
+            if self.dc.stale_teacher_constraint_codes():
+                self._status_with_stale_teacher_constraints(f"{len(self.dc.exams)} Prüfungen importiert")
             self.refresh_views()
             # Nach Import automatisch den Exams-Dialog zur Prüfung/Weiterbearbeitung öffnen
             self.on_committees()
@@ -3321,6 +3530,8 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def on_teachers_import(self):
+        if not self._allow_import_while_solver_idle():
+            return
         # Qt-eigenen (nicht-nativen) Dialog erzwingen
         start_dir = self.dc.last_csv_dir or ""
         dlg = QFileDialog(self, "Lehrkräfte-CSV wählen", start_dir)
@@ -3337,46 +3548,31 @@ class MainWindow(QMainWindow):
         try:
             from import_asv import read_teachers_asv
             rows = read_teachers_asv(fn)
-            # Zusammenführen statt Ersetzen:
-            by_code: Dict[str, Teacher] = {}
-            for t in getattr(self.dc, "teachers", []):
-                code = (t.Lehrkraft or "").strip()
-                if code:
-                    by_code[code] = t
-    
+            if not rows:
+                raise ValueError("Die CSV enthält keine importierbaren Lehrkräftedaten.")
+            new_roster: Dict[str, str] = {}
             for r in rows or []:
                 code = (r.get("Lehrkraft") or "").strip()
                 upz_csv = (r.get("UPZ") or "").strip()
                 if not code:
                     continue
-                if code in by_code:
-                    if upz_csv != "":
-                        by_code[code].UPZ = upz_csv
-                else:
-                    by_code[code] = Teacher(Lehrkraft=code, UPZ=upz_csv, WS="", S="", K="", Belastung="")
-    
-            self.dc.teachers = list(by_code.values())
-            self.dc._rebuild_teacher_index()
+                new_roster[code] = upz_csv
+            if not new_roster:
+                raise ValueError("Die CSV enthält keine gültigen Lehrkraftkürzel.")
+            if not self._confirm_import_plan_reset("der Lehrkräftedaten"):
+                return
+
+            self.dc.commit_import(teacher_roster=new_roster)
             self.dc.last_csv_dir = os.path.dirname(fn)
-            self.dc.status(f"{len(rows or [])} Lehrkräfte importiert/aktualisiert")
-    
-            try:
-                self.dc.count_beisitzer()
-            except Exception:
-                pass
-            try:
-                self.dc.calculate_belastung()
-            except Exception:
-                pass
-            # Importierte Lehrkräftedaten sind Bestandteil des Plans und müssen gespeichert werden.
-            self.dc._dirty = True
-            self.dc.dataChanged.emit()
+            self._status_with_stale_teacher_constraints(f"{len(new_roster)} Lehrkräfte importiert")
             self.on_teachers()
         except Exception as e:
             self.dc.report_error("Lehrkräfte-Import fehlgeschlagen", e)
             QMessageBox.critical(self, "Fehler", str(e))
 
     def on_courses_import(self):
+        if not self._allow_import_while_solver_idle():
+            return
         # Qt-eigenen (nicht-nativen) Dialog erzwingen
         start_dir = self.dc.last_csv_dir or ""
         dlg = QFileDialog(self, "Oberstufenkurse-CSV wählen", start_dir)
@@ -3394,13 +3590,8 @@ class MainWindow(QMainWindow):
             from import_asv import read_courses
             course_rows = read_courses(fn)  # Keys: Lehrkraft, WS, S, K, school_name
 
-            # Konsistentes Verhalten wie bei on_teachers_import/on_import:
-            # Wenn keine verwertbaren Kursdaten geliefert wurden, Statuswarnung und Abbruch,
-            # ohne Logbucheintrag und ohne Dialogöffnung.
             if not course_rows:
-                self.dc.status(f"{len(course_rows or [])} Kurse importiert")
-                self.on_teachers()
-                return
+                raise ValueError("Die CSV enthält keine importierbaren Kursdaten.")
 
             # Bei L-Sportkursen zählen S/K nur für die vom Nutzer ausgewählten FTU-Kurse.
             l_sport_courses = [
@@ -3485,13 +3676,6 @@ class MainWindow(QMainWindow):
                         row["S"] = 0
                         row["K"] = 0
 
-            by_code: Dict[str, Teacher] = {}
-            for t in getattr(self.dc, "teachers", []):
-                code = (t.Lehrkraft or "").strip()
-                if code:
-                    by_code[code] = t
-    
-            # innerhalb EINES Imports aggregieren, nicht über mehrere Imports hinweg
             current: Dict[str, Dict[str, int]] = {}
             for r in course_rows or []:
                 code = (r.get("Lehrkraft") or "").strip()
@@ -3511,47 +3695,27 @@ class MainWindow(QMainWindow):
                 prev["S"]  += s_val
                 prev["K"]  += k_val
                 current[code] = prev
-    
-            for code, sums in current.items():
-                t = by_code.get(code)
-                if not t:
-                    by_code[code] = Teacher(
-                        Lehrkraft=code,
-                        UPZ="",
-                        WS=str(sums["WS"]),
-                        S=str(sums["S"]),
-                        K=str(sums["K"]),
-                        Belastung=""
-                    )
-                else:
-                    t.WS = str(sums["WS"])
-                    t.S  = str(sums["S"])
-                    t.K  = str(sums["K"])
-    
-            self.dc.teachers = list(by_code.values())
-            self.dc._rebuild_teacher_index()
+
+            if not current:
+                raise ValueError("Die CSV enthält keine gültigen Lehrkraftkürzel für Kurse.")
+            if not self._confirm_import_plan_reset("der Oberstufenkurse"):
+                return
+
+            new_course_source = {
+                code: {key: str(value) for key, value in sums.items()}
+                for code, sums in current.items()
+            }
+            school_name = next(
+                (r.get("school_name") for r in course_rows if (r.get("school_name") or "").strip()),
+                "",
+            )
+            self.dc.commit_import(
+                courses=new_course_source,
+                school_name=school_name,
+                replace_school_name=True,
+            )
             self.dc.last_csv_dir = os.path.dirname(fn)
-    
-            try:
-                sn = next((r.get("school_name") for r in (course_rows or []) if (r.get("school_name") or "").strip() != ""), "")
-                if sn:
-                    self.dc.school_name = sn
-            except Exception:
-                pass
-    
-            try:
-                self.dc.count_beisitzer()
-            except Exception:
-                pass
-            try:
-                self.dc.calculate_belastung()
-            except Exception:
-                pass
-    
-            self.dc.status(f"{len(course_rows or [])} Kurse importiert")
-            # Importierte Kurs- und Lehrkräftedaten sind Bestandteil des Plans.
-            self.dc._dirty = True
-            self.dc.dataChanged.emit()
+            self._status_with_stale_teacher_constraints(f"{len(course_rows)} Kurse importiert")
             self.on_teachers()
         except Exception as e:
             self.dc.report_error("Kurs-Import fehlgeschlagen", e)
@@ -3679,10 +3843,14 @@ class MainWindow(QMainWindow):
         if not self.dc.exams:
             QMessageBox.information(self, "Hinweis", "Bitte zuerst Prüfungen importieren.")
             return
+        if self._solver_is_running():
+            QMessageBox.information(self, "Solver läuft", "Ein Planungsdurchlauf ist bereits aktiv. Bitte warten Sie auf dessen Abschluss.")
+            return
         self.logWin.show()
         self.dc.status("Solver gestartet...")
 
         # Thread + Worker starten
+        self._solver_pending = True
         self.thread = QThread(self)
         self.worker = SolverWorker(self.dc)
         self.worker.moveToThread(self.thread)
@@ -3698,6 +3866,7 @@ class MainWindow(QMainWindow):
         self.thread.start()
 
     def _on_solver_finished(self, schedule_rows, status):
+        self._solver_pending = False
         # Plan in GUI bernehmen
         # Wichtig: Items ohne zugewiesenen Raum (leer/None) sind "geparkt" und
         # erhalten Woche/Tag/SlotIndex/Uhrzeit = None sowie Raum = "".
@@ -3790,6 +3959,7 @@ class MainWindow(QMainWindow):
             self.act_redo.setEnabled(can_r)
 
     def _on_solver_error(self, msg: str):
+        self._solver_pending = False
         self.dc.report_error("Solver-Fehler", Exception(msg))
         QMessageBox.critical(self, "Fehler", msg)
 
@@ -5014,13 +5184,13 @@ class TeachersDialog(QDialog):
 
         # Vor dem Laden K2 anhand der aktuellen Exams zählen/aktualisieren
         try:
-            self.dc.count_beisitzer()
+            self.dc.count_beisitzer(emit=False)
         except Exception:
             pass
 
         # Danach Belastung berechnen (nutzt u. a. K2)
         try:
-            self.dc.calculate_belastung()
+            self.dc.calculate_belastung(emit=False)
         except Exception:
             pass
         self._load_teachers()
@@ -5199,6 +5369,11 @@ class TeachersDialog(QDialog):
                     if (t.Lehrkraft or "").strip() == code:
                         t.WS = new_ws  # als String speichern (Belastung parst später Integer)
                         break
+                course_values = dict(self.dc.course_source.get(code, {}))
+                course_values["WS"] = new_ws
+                course_values.setdefault("S", "")
+                course_values.setdefault("K", "")
+                self.dc.course_source[code] = course_values
                 # Undo/Redo-Command pushen
                 try:
                     cmd = EditTeacherFieldCommand(code, "WS", before_val, new_ws)

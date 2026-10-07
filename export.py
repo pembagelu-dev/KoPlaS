@@ -1,9 +1,10 @@
-Version = "0.1 Build 1.25 (stable)"
+Version = "0.1 (Build 11)"
 
 """
 ----------
 ChangeLog
 ----------
+Build 1.26: Schülernamen in Lehrer- und Schülerplan anhand der tatsächlichen Textbreite skaliert; lange zusammengesetzte Nachnamen werden bei Bedarf abgekürzt, NTA-Zeiten mitgemessen
 Build 1.25: Sortierung im Lehrerplan an den Schülerplan angeglichen (Raumtext, frühester Slot, bisherige Gruppenreihenfolge)
 Build 1.24: Unnötige Nachnamensauswertung und Excel-Zeitberechnungen entfernt; doppelte Spaltenbreitenschlüssel bereinigt
 Spaltenbreiten angepasst
@@ -32,6 +33,7 @@ Umlaute ausgebessert
 
 import sys
 import json
+from functools import lru_cache
 from collections import defaultdict, OrderedDict
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -75,6 +77,98 @@ LEFT_MARGIN = 1.0
 RIGHT_MARGIN = 1.0
 TOP_MARGIN = 1.0
 BOTTOM_MARGIN = 1.0
+
+_FONT_METRICS_APP = None
+
+
+@lru_cache(maxsize=8192)
+def _slot_text_width_pt(text: str, size_pt: float) -> float:
+    """Misst die Breite eines Arial-Fettdruck-Runs in typografischen Punkten."""
+    global _FONT_METRICS_APP
+    from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication
+
+    app = QGuiApplication.instance()
+    if app is None:
+        _FONT_METRICS_APP = QGuiApplication([])
+        app = _FONT_METRICS_APP
+
+    font = QFont(FONT_NAME)
+    font.setPointSizeF(float(size_pt))
+    font.setBold(True)
+    metrics = QFontMetricsF(font)
+    screen = app.primaryScreen()
+    dpi = screen.logicalDotsPerInchX() if screen else 96.0
+    return metrics.horizontalAdvance(text) * 72.0 / dpi
+
+
+def _abbreviate_surname_part(name: str) -> str:
+    """Kürzt den letzten ausgeschriebenen Teil eines zusammengesetzten Nachnamens."""
+    suffix = ""
+    name_core = name
+
+    # Den optionalen Initial-Bestandteil eines Namenskollisionsfalls erhalten.
+    if len(name_core) >= 2 and name_core[-2].isalpha() and name_core[-1] == "." and name_core[-3:-2].isspace():
+        suffix = name_core[-2:]
+        name_core = name_core[:-3].rstrip()
+
+    import re
+    parts = list(re.finditer(r"[^\s-]+", name_core))
+    for part in reversed(parts):
+        if part.start() == 0 or len(part.group()) <= 2 or part.group().endswith("."):
+            continue
+        abbreviated = name_core[:part.start()] + part.group()[0] + "." + name_core[part.end():]
+        return abbreviated + ((" " + suffix) if suffix else "")
+
+    # Falls nur noch ein ungewöhnlich langer Einzelbestandteil übrig ist,
+    # kürzen wir ihn moderat ab, statt die Namenszelle überlaufen zu lassen.
+    if parts and len(parts[0].group()) > 13:
+        part = parts[0]
+        abbreviated = name_core[:part.start()] + part.group()[:11] + "." + name_core[part.end():]
+        return abbreviated + ((" " + suffix) if suffix else "")
+    return name
+
+
+def _fit_slot_name(full_text: str, cell_width_cm: float = COL_W_SLOT) -> Tuple[str, Optional[str], int, int]:
+    """Wählt eine passende Schriftgröße und kürzt bei Bedarf zusammengesetzte Namen."""
+    base_text = full_text or ""
+    nta_text = None
+    split_idx = base_text.rfind(" (")
+    if split_idx != -1 and base_text.endswith(")"):
+        base_text, nta_text = base_text[:split_idx], base_text[split_idx + 1:]
+
+    # Zellränder und eine kleine Reserve für Unterschiede zwischen Qt und Word.
+    available_pt = (cell_width_cm / 2.54 * 72.0 - 12.0) * 0.98
+
+    def fits(candidate: str, size_pt: int) -> bool:
+        width = _slot_text_width_pt(candidate, size_pt)
+        if nta_text:
+            width += _slot_text_width_pt(" ", size_pt)
+            width += _slot_text_width_pt(nta_text, min(10, size_pt))
+        return width <= available_pt
+
+    while True:
+        # Lange Namen zuerst sinnvoll abkürzen, damit möglichst mindestens
+        # 10 pt erhalten bleiben. Erst danach wird bis 8 pt verkleinert.
+        for size_pt in range(FONT_SIZE_DEFAULT, 9, -1):
+            if fits(base_text, size_pt):
+                return base_text, nta_text, size_pt, min(10, size_pt)
+
+        abbreviated = _abbreviate_surname_part(base_text)
+        if abbreviated == base_text:
+            # Ein nicht weiter sinnvoll kürzbarer Name bleibt vollständig;
+            # 8 pt ist die Untergrenze für die Ausgabe.
+            for size_pt in (9, 8):
+                if fits(base_text, size_pt):
+                    return base_text, nta_text, size_pt, min(10, size_pt)
+            return base_text, nta_text, 8, min(10, 8)
+        base_text = abbreviated
+
+
+def _set_cell_no_wrap(cell) -> None:
+    """Verhindert, dass Word einen bereits passend skalierten Namen umbrechen kann."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    if tc_pr.find(qn("w:noWrap")) is None:
+        tc_pr.append(OxmlElement("w:noWrap"))
 
 # Excel-Konstanten
 XLSX_HEADER_FONT = ("Arial", 11, True)
@@ -719,24 +813,13 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
             for si in range(num_slots):
                 cell = row.cells[4 + si]
                 full = info["slots"][si] or ""
-                # Falls hinter dem Namen eine NTA-Zeit in Klammern steht, diese separat formatieren
-                base_text = full
-                nta_text = None
-                split_idx = full.rfind(" (")
-                if split_idx != -1 and full.endswith(")"):
-                    base_text = full[:split_idx]
-                    # nta_text inklusive der öffnenden Klammer, z. B. "(14.19)"
-                    nta_text = full[split_idx+1:]
-
-                # Schriftgröße für den Namens-Run wie bisher dynamisch
-                size_name = FONT_SIZE_DEFAULT
-                if len(base_text) > 18:
-                    size_name = 11
-                elif len(base_text) > 14:
-                    size_name = 12
+                # Breitenbasierte Schriftgröße; lange zusammengesetzte Namen
+                # werden bei Bedarf gekürzt. Die NTA-Zeit wird mitgemessen.
+                base_text, nta_text, size_name, size_nta = _fit_slot_name(full)
 
                 # Zelle leeren und manuell formatierte Runs schreiben
                 cell.text = ""
+                _set_cell_no_wrap(cell)
                 p = cell.paragraphs[0]
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
@@ -756,7 +839,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
                     run_nta = p.add_run(nta_text)  # z. B. "(14.19)"
                     run_nta.bold = True
                     run_nta.font.name = FONT_NAME
-                    run_nta.font.size = Pt(10)
+                    run_nta.font.size = Pt(size_nta)
 
             # Zentrierung sicherstellen
             for c in range(total_cols):
@@ -1175,18 +1258,9 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
             for si in range(num_slots):
                 cell = row.cells[3 + si]
                 full = info["slots"][si] or ""
-                base_text = full
-                nta_text = None
-                split_idx = full.rfind(" (")
-                if split_idx != -1 and full.endswith(")"):
-                    base_text = full[:split_idx]
-                    nta_text = full[split_idx+1:]
-                size_name = FONT_SIZE_DEFAULT
-                if len(base_text) > 18:
-                    size_name = 11
-                elif len(base_text) > 14:
-                    size_name = 12
+                base_text, nta_text, size_name, size_nta = _fit_slot_name(full)
                 cell.text = ""
+                _set_cell_no_wrap(cell)
                 p = cell.paragraphs[0]
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run_name = p.add_run(base_text)
@@ -1200,7 +1274,7 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
                     run_nta = p.add_run(nta_text)
                     run_nta.bold = True
                     run_nta.font.name = FONT_NAME
-                    run_nta.font.size = Pt(10)
+                    run_nta.font.size = Pt(size_nta)
             # Zentrieren
             for c in range(total_cols):
                 for p in row.cells[c].paragraphs:
