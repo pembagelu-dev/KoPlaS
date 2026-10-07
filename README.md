@@ -71,10 +71,11 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.8 (Build 14.49.42)**
+**Aktuelle Version: 1.2.8 (Build 14.49.43)**
 
 ### Version 1.2.8
 
+- Im Ausschüsse-Dialog bestätigt Tab die Eingabe und springt zur Bearbeitung derselben Spalte in die nächste Zeile.
 - Word-Exporte passen Schülernamen samt NTA-Zeit an die feste Slotbreite an; lange zusammengesetzte Nachnamen werden bei Bedarf abgekürzt.
 - Fehler beim Parken von Prüfungsblöcken behoben: Der Undo-Zustand greift sicher auf die optional dynamisch berechnete Uhrzeit zu.
 - Prüfungs-, Lehrkräfte- und Kursimporte ersetzen jeweils ihre eigene Datenquelle. Die Lehrkräfteliste wird aus den getrennten Quellen und den Prüfungsbeteiligten neu aufgebaut; K2 und Belastung werden aktualisiert. Ein Import funktioniert weiterhin einzeln, und der Solver benötigt nur Prüfungsdaten.

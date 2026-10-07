@@ -1,10 +1,11 @@
-Version = "1.2.8 (Build 42)"
+Version = "1.2.8 (Build 43)"
 """
 ----------
 ChangeLog
 ----------
 
 Version 1.2.8
+ExamsDialog: Tab bestätigt Zelländerungen und öffnet dieselbe editierbare Spalte in der nächsten Zeile
 Word-Exporte: Slotnamen und NTA-Zeiten werden anhand der Arial-Breite auf einzeilige Zellen skaliert; lange zusammengesetzte Nachnamen werden bei Bedarf sinnvoll abgekürzt
 Fehler beim Parken eines Prüfungsblocks behoben: Undo-Zustände lesen die dynamisch berechnete Uhrzeit optional
 Importe transaktional: Planlöschung nach Bestätigung, getrennte Lehrkräfte-/Kursquellen, abgeleitete K2-/Belastungswerte und veraltete Plan-/Undo-Referenzen konsistent aktualisiert; Solver weiterhin ohne Kurs-/Lehrkräfteimport nutzbar
@@ -147,7 +148,7 @@ from PySide6.QtGui import (
     QKeySequence, QAction, QFont, QColor, QPainter, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
 )
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView,
+    QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView, QAbstractItemDelegate,
     QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QSpinBox, QDoubleSpinBox,
     QTimeEdit, QDateEdit, QFormLayout, QCheckBox, QPlainTextEdit, QStatusBar, QMenuBar,
     QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QHeaderView, QPushButton, QMenu, QTextEdit,
@@ -4844,6 +4845,9 @@ class ExamsDialog(QDialog):
         self.model = QStandardItemModel(0, 7)
         self.model.setHorizontalHeaderLabels(["ID", "Schüler", "NTA (%)", "Fach", "Thema", "Prüfer", "Beisitzer"])
         self.table.setModel(self.model)
+        # Tab übernimmt den Editorinhalt und setzt die Bearbeitung in derselben
+        # Spalte eine Zeile tiefer fort (statt horizontal zur nächsten Zelle).
+        self.table.setItemDelegate(_ExamsTabDelegate(self.table, self))
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.setSortingEnabled(True)
@@ -4913,6 +4917,20 @@ class ExamsDialog(QDialog):
         #box.accepted.connect(self.on_ok)
         #box.rejected.connect(self.reject)
         #layout.addWidget(box)
+
+    def _continue_exam_edit(self, editor):
+        """Tab-Navigation aus dem Delegate: Wert sichern, dann gleiche Spalte nächste Zeile."""
+        current = self.table.currentIndex()
+        next_row = current.row() + 1
+        if next_row >= self.model.rowCount():
+            return
+        target = self.model.index(next_row, current.column())
+        if not (self.model.flags(target) & Qt.ItemIsEditable):
+            return
+        self._capture_before_value(target)
+        self.table.setCurrentIndex(target)
+        self.table.edit(target)
+
 
     def focus_exam_row(self, exam_idx: int):
         """
@@ -5161,6 +5179,30 @@ class ExamsDialog(QDialog):
                     be_item.setBackground(COLOR_SOFT_WARN)
                 else:
                     be_item.setBackground(QColor(255, 255, 255))
+
+class _ExamsTabDelegate(QStyledItemDelegate):
+    """Bearbeitet Tab für die Ausschusstabelle.
+
+    Tab bestätigt zuerst den Inhalt des aktiven Editors über den normalen
+    Delegate-Pfad. Anschließend wird die Bearbeitung in derselben Spalte der
+    nächsten Tabellenzeile fortgesetzt. Am Tabellenende bleibt die Navigation
+    stehen; Zeilen werden nicht zyklisch durchlaufen.
+    """
+    def __init__(self, view, dialog):
+        super().__init__(view)
+        self._dialog = dialog
+
+    def eventFilter(self, editor, event):
+        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Tab
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))):
+            # Qt committed das Model und löst damit itemChanged, Validierung
+            # und Undo wie bei einem regulären Ende der Bearbeitung aus.
+            self.commitData.emit(editor)
+            self.closeEditor.emit(editor, QAbstractItemDelegate.NoHint)
+            QTimer.singleShot(0, lambda: self._dialog._continue_exam_edit(editor))
+            return True
+        return super().eventFilter(editor, event)
+
 
 class TeachersDialog(QDialog):
     def __init__(self, parent, dc: DataController):
