@@ -1,139 +1,4 @@
-Version = "1.2.9 (Build 45)"
-"""
-----------
-ChangeLog
-----------
-
-Version 1.2.9 (Build 45)
-Solver: Harte Begrenzung der maximalen Einsatztage pro Person zählt Prüfer- und Beisitzertätigkeiten rollenübergreifend; leere Beisitzer werden dabei ignoriert.
-Prüfungsblöcke: Schülernamen werden innerhalb der bestehenden Zelle größenangepasst und bei Bedarf nach der Export-Kurznamenslogik gekürzt.
-
-Version 1.2.8
-ExamsDialog: Tab bestätigt Zelländerungen und öffnet dieselbe editierbare Spalte in der nächsten Zeile
-Word-Exporte: Slotnamen und NTA-Zeiten werden anhand der Arial-Breite auf einzeilige Zellen skaliert; lange zusammengesetzte Nachnamen werden bei Bedarf sinnvoll abgekürzt
-Fehler beim Parken eines Prüfungsblocks behoben: Undo-Zustände lesen die dynamisch berechnete Uhrzeit optional
-Importe transaktional: Planlöschung nach Bestätigung, getrennte Lehrkräfte-/Kursquellen, abgeleitete K2-/Belastungswerte und veraltete Plan-/Undo-Referenzen konsistent aktualisiert; Solver weiterhin ohne Kurs-/Lehrkräfteimport nutzbar
-Import und Solverlauf können nicht parallel Datenstände verändern
-Belastungseinstellungen werden beim Laden gespeicherter Pläne wiederhergestellt
-Summenzeile im TeachersDialog bündig ausgerichtet, Summenwerte zentriert und Lehrkraft-/UPZ-Zellen zu „Summe“ verbunden
-Erfolgreiche Lehrkräfte- und Kursimporte markieren den Plan als geändert und lösen beim Beenden die Speicherabfrage aus
-L-Sportkurse werden vor dem Import zur FTU-Auswahl angezeigt; S/K zählen nur für ausgewählte Kurse
-Summen S/S2 und K/K2 gegen die eindeutige Schülerzahl geprüft und Abweichungen farblich markiert
-Report: Unbenutzte Ausrichtungsfunktion und Imports entfernt; CLI-Report gibt den Quelldateinamen aus, GUI-Report keinen Platzhalter
-ASV-Import: CSV-Helfer/Zahlenkonvertierung bereinigt; L-Sportkurse zur FTU-Auswahl, WS bei exakt gleichen Kursbezeichnungen einmalig
-
-Version 1.2.7
-Drei Exportvarianten für Plan (LK, SuS, Reinigungspersonal), Auswahldialog
-Fehlerbehebungen: Belastungswert im Report nur bei geplanten LK
-
-Version 1.2.6
-Änderungen an Zeit, Räume und Bedingungen führen zu Speichern bei Schließen
-Suchfunktion implementiert (Strg + F bzw. Cmd + F) Schüler, Prüfer, Beisitzer, Thema
-
-Version 1.2.5
-Absperrung bei mehr als zwei Themen-Kopplungen hinzugefügt. Raum für Aufsicht ist der Vorbereitungsraum. NTA wird berücksichtigt, falls dadurch Absperrung verkürzt werden kann.
-Belastungsparameter nun vom Nutzer definierbar und persistent gespeichert
-Export: Auch Thema in Exceltabelle und Spalten auswählbar
-
-Version 1.2.4
-Faire Tagesverteilung der Schülerslots pro Schüler jetzt berechnet
-WS und Prüfer änderbar, wird persistent gespeichert
-Dialogbreiten jetzt dynamisch und OS unabhängig
-Schriftgröße Block und Blockhöhe jetzt OS abhängig und angepasst (etwas größer)
-
-Version 1.2.3
-Mehr als 3er Koppel möglich (maximal 5)
-Konflikte werden nach Öffnen einer Datei markiert
-Prüfungen pro Tag werden gezählt und in Statusleiste ausgegeben
-Raumänderung via Kontextmenü (Ändern, Löschen, Hinzufügen (rechts davon))
-
-Version 1.2.2
-Erweiterung des Reports um die Lehrerdaten zu den Prüfungen
-Defaultwerte der Einstellungen angepasst
-Mehr Infos im Log
-Dateiname der aktuell geladenen Datei in der Statuszeile rechts
-Prüfungen im Parkplatz werden dort nun ohne Slotdaten (Woche, Tag, Slot, Uhrzeit) abgelegt. Verhindert sauber falsche Berechnungen beim Drop
-Summenzeile im TeachersDialog ergänzt
-Speichern unter hinzugefügt
-
-Version 1.2
-PySide6 Sprachdatei Deutsch verwendet
-Von Systemdialogen auf PySide6 native Dialoge umgestellt
-
-Version 1.1
-Import der Lehrkräfte mit UPZ möglich. Normalisierung der LK auf Kürzel
-Import Oberstufenkurse mit WS, S, K Zahlen für Belastungsrechnung
-Export des importierten Schulnamens in den Plan
-Vorbereitungsraum hinzugefügt
-Sortierung im Export nach Raum und Zeit (time_info erhält auch die Raumliste in exakter Reihenfolge)
-Räume mit Prüfungen können nicht gelöscht werden
-Teachers Dialog S2 (editierbar) und K2 (automatische Zählung aus dc.exams, leerer String, wenn nicht Beisitzer)
-Prüfungsbelastung jetzt berechnet und automatisch aktualisiert
-Bei Änderungen wird Speichern erfragt (Beenden, Öffnen)
-kleinere Anpassungen (Fensterbreiten)
-Belastungswerte sind farblich hervorgehoben
-Funktion Aufsichten entfernt
-Menüanpassungen (Export als Kaskade mit neuen Optionen), Sortierung in Datei anders
-
-Version 1.0
-GUI für Nutzung auch außerhalb des Terminals
-Leerer Beisitzer auch per Bedingung steuerbar
-Parkplatzraum für durch MIP nicht zugewiesene Prüfungen
-Besseres DnD beim Parkplatz V3
-Beisitzer Aktualisierung wird geprüft, Verschiebung auch in verbotenen Bereiche (dann farbiges Highlight mit stetiger Neuberechnung bei Änderungen) außer bei belegtem Slot (sonst Überlappung von Blöcken)
-Konsistente Prüfung von Bedingungen bei Verschiebung und Veränderungen an Daten
-Slot 2 jetzt gelb (soft speziell)
-Parkplatz einspaltig (Breite wie Right Model)
-Rechts Klick-Menü für Blöcke (erweitern um Prüfer als Beisitzer und Beisitzer als Prüfer sowie Beisitzer ändern)
-Anpassung Exportfunktion
-NTA jetzt möglich
-Undo/Redo Fähigkeit für maximal 10 Schritte in der Slotplanung (nicht Bedingungen und nicht Zeit/Raumstruktur)
-Parkplatz View jetzt feste Breite wie Blöcke
-
-Version 0.1
-CP-SAT Planer mit CLI Argumenten ohne GUI
-Prüfungen verschiebbar
-Export als Worddatei
-
-----------
-Bugfix
-----------
-Redaktionelle Korrekturen in ChangeLog und Bugfix-Notizen
-Checkbox aktiviert soft_gap Spinbox nicht
-Leere Beisitzer führen zu Parallelitätskonflikt
-Ad Hoc Check bei DnD für maximale Zahl an Prüfungen pro Tag jetzt auch an Checkbox geknüpft
-Tippfehler bei ignore_empty_beisitzer
-Trenner zwischen Tagen (wieder) eingefügt
-max_per_day wurde hart geprüft (vgl. max_dyas_per_teacher)
-Beginn Slot 1 jetzt keine Verletzung mehr (auch rollenübergreifend)
-Maximale Tage pro Prüfer jetzt personenspezifisch (zuvor über alle Personen gesammelt)
-Highlight Violett auch im Parkplatz (OK)
-Kopplungsblöcke konnten ohne Markierung rot getrennt werden (OK)
-Syntax-Bugs entfernt
-Statusmeldungen in Statusleiste (OK), Meldungen angepasst
-Redo/Undo nicht für ExamsDialog (OK) und nicht für Parkplatz (OK)
-Umlautfehler behoben, neues, einheitliches Importfenster (Öffnen des Dialogs nach Import)
-LK Import überschreibt Kursimport, behoben
-mehrfacher Kursimport verdoppelt die Zahlen WS, S und K, behoben
-Speichern bei Beenden wird trotz Ja nicht durchgeführt
-Änderung von S2 berechnet Belastung nicht neu (OK)
-Tagesabstände waren in der GUI noch ohne Wochenende (im Planer bereits korrekt)
-Klammer entfernt im Constraints Dialog
-Kontextmenü bleibt hängen (OK)
-Warnung über veraltete PySide6 Aufrufe entfernt
-Header Kontextmenü für Räume öffnet nun sauber
-Undo/Redo auf alle relevanten Aktionen ausgeweitet (bisher teilweise fehlerhaft)
-Konsistente Fehlermeldung in der Statuszeile bei falschem Import
-Versteckte ID Spalte im ExamsDialog wird jetzt auch in die Breite einbezogen
-Anpassung der Dialogbreiten auf OS Spezifikationen
-QDialog im DataController nicht parent sondern None
-Uhrzeit nicht mehr gesetzt sondern live aus TimeSettings berechnet"
-"""
-
-"""
-Aus App-Bundle ein DMG erstellen (icns Icon sowie settings.py im selben Verzeichnis \dist)
-dmgbuild -s settings.py "KoPlaS" KoPlaS.dmg
-"""
+Version = "1.2.9 (Build 46)"
 
 import sys
 import os
@@ -345,7 +210,7 @@ MAX_UNDO = 10       #maximal 10 Einträge in der Historie
 #              + KORREKTUR_SCHRIFTLICH_MINUTEN*FAKTOR_NACHKORREKTUR*S2
 #              + KOLLOQUIUM_PRUEFER_ZEIT*K
 #              + KOLLOQUIUM_PRUEFER_ZEIT*FAKTOR_BEISITZER*K2
-#              - UNTERRICHT_AUFWAND*WS) / UPZ
+#              - UNTERRICHT_AUFWAND*WS)
 
 # Arbeitsordner
 def ensure_work_dir():
@@ -881,9 +746,8 @@ class DataController(QObject):
         """
         Berechnet Belastungswerte für die übergebene Lehrkräfteliste.
         Interne Konvertierung:
-        - UPZ kommt als '12.0' -> es wird die Ganzzahl vor dem Punkt verwendet (12).
         - WS, S, S2, K, K2 kommen als Strings natürlicher Zahlen -> int-Parsing; leere Strings -> 0.
-        Negative Ergebnisse sind erlaubt (keine Kappung).
+        UPZ wird nicht mehr verwendet. Negative Ergebnisse sind erlaubt (keine Kappung).
         """
         def to_int_safe(val: Optional[str]) -> int:
             try:
@@ -893,37 +757,20 @@ class DataController(QObject):
                 return int(s)
             except Exception:
                 return 0
-        def parse_upz_int(upz_str: Optional[str]) -> int:
-            try:
-                s = str(upz_str).strip()
-                if s == "":
-                    return 0
-                # Nur den Teil vor dem Punkt nehmen
-                if "." in s:
-                    s = s.split(".", 1)[0]
-                return int(s)
-            except Exception:
-                return 0
-
         for t in teachers or []:
-            upz_i = parse_upz_int(t.UPZ)*60
             ws_i  = to_int_safe(t.WS)
             s_i   = to_int_safe(t.S)
             s2_i  = to_int_safe(getattr(t, "S2", ""))
             k_i   = to_int_safe(t.K)
             k2_i  = to_int_safe(getattr(t, "K2", ""))
-            # Division durch 0 vermeiden: falls UPZ == 0, Ergebnis als 0.00 definieren
-            if upz_i == 0:
-                belastung_val = 0.0
-            else:
-                numerator = (
-                    self.settings.workload_korrektur_min * s_i
-                    + self.settings.workload_korrektur_min * self.settings.workload_faktor_nachkorrektur * s2_i
-                    + self.settings.workload_kolloq_pruefer_min * k_i
-                    + self.settings.workload_kolloq_pruefer_min * self.settings.workload_faktor_beisitzer * k2_i
-                    - self.settings.workload_unterricht_aufwand_min * ws_i
-                )
-                belastung_val = float(numerator) / float(upz_i)
+            numerator = (
+                self.settings.workload_korrektur_min * s_i
+                + self.settings.workload_korrektur_min * self.settings.workload_faktor_nachkorrektur * s2_i
+                + self.settings.workload_kolloq_pruefer_min * k_i
+                + self.settings.workload_kolloq_pruefer_min * self.settings.workload_faktor_beisitzer * k2_i
+                - self.settings.workload_unterricht_aufwand_min * ws_i
+            )
+            belastung_val = float(numerator)
             # Als String mit 2 Nachkommastellen speichern
             try:
                 t.Belastung = f"{belastung_val:.2f}"
@@ -3677,10 +3524,11 @@ class MainWindow(QMainWindow):
             new_roster: Dict[str, str] = {}
             for r in rows or []:
                 code = (r.get("Lehrkraft") or "").strip()
-                upz_csv = (r.get("UPZ") or "").strip()
                 if not code:
                     continue
-                new_roster[code] = upz_csv
+                # UPZ bleibt im gespeicherten Altformat lesbar, ist für neue
+                # Importe und die Belastungsberechnung jedoch ohne Bedeutung.
+                new_roster[code] = ""
             if not new_roster:
                 raise ValueError("Die CSV enthält keine gültigen Lehrkraftkürzel.")
             if not self._confirm_import_plan_reset("der Lehrkräftedaten"):
@@ -5334,8 +5182,8 @@ class TeachersDialog(QDialog):
         layout = QVBoxLayout(self)
         self.table = QTableView()
         self.dc = dc
-        self.model = QStandardItemModel(0, 8)
-        self.model.setHorizontalHeaderLabels(["Lehrkraft", "UPZ", "WS", "S", "S2", "K", "K2", "Belastung"])
+        self.model = QStandardItemModel(0, 7)
+        self.model.setHorizontalHeaderLabels(["Lehrkraft", "WS", "S", "S2", "K", "K2", "Belastung"])
         self.table.setModel(self.model)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -5364,9 +5212,9 @@ class TeachersDialog(QDialog):
         self.model.itemChanged.connect(self._on_item_changed)
         # Wir erstellen eine kleine, einzeilige Nicht-Editable QTableView, die nur die Summen anzeigt.
         self.summary_view = QTableView()
-        self.summary_model = QStandardItemModel(1, 8)
+        self.summary_model = QStandardItemModel(1, 7)
         # Dieselben Header-Labels verwenden (Header verstecken später)
-        self.summary_model.setHorizontalHeaderLabels(["Lehrkraft", "UPZ", "WS", "S", "S2", "K", "K2", "Belastung"])
+        self.summary_model.setHorizontalHeaderLabels(["Lehrkraft", "WS", "S", "S2", "K", "K2", "Belastung"])
         self.summary_view.setModel(self.summary_model)
         # Darstellung: keine Kopfzeile zeigen, keine Auswahl
         self.summary_view.horizontalHeader().setVisible(False)
@@ -5436,9 +5284,8 @@ class TeachersDialog(QDialog):
     def _load_teachers(self):
         self.model.setRowCount(0)
         for t in getattr(self.dc, "teachers", []):
-            # Spalten: Lehrkraft, UPZ, WS, S, S2, K, K2, Belastung
+            # Sichtbare Spalten: Lehrkraft, WS, S, S2, K, K2, Belastung.
             it_lehr = QStandardItem(t.Lehrkraft or ""); it_lehr.setEditable(False)
-            it_upz  = QStandardItem(t.UPZ or ""); it_upz.setEditable(False)
             it_ws   = QStandardItem(t.WS or ""); it_ws.setEditable(True)
             it_s    = QStandardItem(t.S or ""); it_s.setEditable(False)
             it_s2   = QStandardItem(getattr(t, "S2", "") or ""); it_s2.setEditable(True)
@@ -5447,7 +5294,7 @@ class TeachersDialog(QDialog):
             it_bel  = QStandardItem(t.Belastung or ""); it_bel.setEditable(False)
             # Alignment setzen: Mitte horizontal, zentriert vertikal
             center = Qt.AlignCenter
-            for it in (it_upz, it_ws, it_s, it_s2, it_k, it_k2, it_bel):
+            for it in (it_ws, it_s, it_s2, it_k, it_k2, it_bel):
                 it.setTextAlignment(center)
             # Optional: Lehrkraft links lassen (Standard) oder ebenfalls zentrieren
             #it_lehr.setTextAlignment(center)
@@ -5468,14 +5315,14 @@ class TeachersDialog(QDialog):
             except Exception:
                 # nicht parsebar -> keine Färbung
                 pass
-            self.model.appendRow([it_lehr, it_upz, it_ws, it_s, it_s2, it_k, it_k2, it_bel])
+            self.model.appendRow([it_lehr, it_ws, it_s, it_s2, it_k, it_k2, it_bel])
         # Nach dem (Neu-)Laden ebenfalls die Summenzeile aktualisieren
         self._update_summaries()
 
     def _on_item_changed(self, item: QStandardItem):
         # Nur S2 und WS sind editierbar/persistiert
         col = item.column()
-        if col not in (2, 4):
+        if col not in (1, 3):
             return
         try:
             row = item.row()
@@ -5485,7 +5332,7 @@ class TeachersDialog(QDialog):
             if not code:
                 return
             # Spaltenbehandlung
-            if col == 4:
+            if col == 3:
                 # neuen S2-Wert (frei, als String)
                 before_val = None
                 # Vorher-Wert aus dc holen
@@ -5506,7 +5353,7 @@ class TeachersDialog(QDialog):
                     self.dc.push_command(cmd)
                 except Exception:
                     pass
-            elif col == 2:
+            elif col == 1:
                 # WS numerisch validieren: leer -> "", sonst nichtnegativer Integer
                 txt = item.text().strip() if item.text() is not None else ""
                 if txt == "":
@@ -5556,8 +5403,8 @@ class TeachersDialog(QDialog):
                 # Aktualisierte Teacher-Daten holen
                 t_now = next((tt for tt in getattr(self.dc, "teachers", []) if (tt.Lehrkraft or "").strip() == code), None)
                 if t_now:
-                    # Spalte 7 = Belastung im Dialogmodell
-                    bel_item = self.model.item(row, 7)
+                    # Spalte 6 = Belastung im Dialogmodell
+                    bel_item = self.model.item(row, 6)
                     if bel_item:
                         bel_item.setText(t_now.Belastung or "")
                         # Farbe entsprechend dem neuen Wert setzen
@@ -5618,7 +5465,6 @@ class TeachersDialog(QDialog):
                 # Leichter grauer Hintergrund, nur dezent
                 it.setBackground(QColor(255, 255, 255))
             self.summary_model.item(0, 0).setText("Summe")
-            self.summary_view.setSpan(0, 0, 1, 2)
             # Spaltenbreiten synchronisieren mit der Haupttabelle
             try:
                 for c in range(self.model.columnCount()):
@@ -5634,7 +5480,7 @@ class TeachersDialog(QDialog):
             pass
 
     def _compute_sums(self):
-        #Berechnet Summen der Spalten S(3), S2(4), K(5), K2(6) über self.dc.teachers.
+        # Berechnet Summen von WS, S, S2, K und K2 über self.dc.teachers.
         #Liefert Dictionary mit ints oder 0.
         sums = {"WS": 0, "S": 0, "S2": 0, "K": 0, "K2": 0}
         try:
@@ -5663,7 +5509,7 @@ class TeachersDialog(QDialog):
                 students.add(student)
 
         sums = self._compute_sums()
-        checks = ((3, "S", 3), (4, "S2", 3), (5, "K", 2), (6, "K2", 2))
+        checks = ((2, "S", 3), (3, "S2", 3), (4, "K", 2), (5, "K2", 2))
         for column, key, divisor in checks:
             total = sums[key]
             matches = total % divisor == 0 and total // divisor == len(students)
@@ -5679,7 +5525,7 @@ class TeachersDialog(QDialog):
             sums = self._compute_sums()
             # Flle die Summary-Modellelemente:
             # Wir zeigen in den relevanten Spalten die Summen; andere Spalten leer oder passend beschriftet
-            labels = ["Summe", "", str(sums.get("WS", 0)), str(sums.get("S", 0)), str(sums.get("S2", 0)), str(sums.get("K", 0)), str(sums.get("K2", 0)), ""]
+            labels = ["Summe", str(sums.get("WS", 0)), str(sums.get("S", 0)), str(sums.get("S2", 0)), str(sums.get("K", 0)), str(sums.get("K2", 0)), ""]
             for c, txt in enumerate(labels):
                 it = self.summary_model.item(0, c)
                 if it is None:

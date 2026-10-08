@@ -1,31 +1,5 @@
 Version = "0.2 (Build 13)"
 
-"""
-----------
-ChangeLog
-----------
-Build 13: Harte Begrenzung der Einsatztage bildet belegte Personentage exakt ab; leere Beisitzer erzeugen keine künstliche Person.
-Effizienz: b-Vektoren (Belegungen je Prüfer/Tag/Slot) einmalig erzeugen und in hart/weich gemeinsam nutzen
-Effizienz: Caching von slotweisen Summen pro (Prüfer, Tag, Slot), keine redundanten Summierungen
-Harte Lückenregel bleibt möglich, aber effizienter (gemeinsame b-Vektoren); weiche Doppelstrafe reduziert, wenn hart aktiv
-CP-SAT: Probing aktiviert (Level 1), Hinweise zu linearization_level=2 in Kommentar (Standard bleibt 1)
-Weiche Permutationspaar-Nähe: nur nächste k Paare (LIMIT_PERM_PAIRS) statt O(n^2) (konfig. Konstante)
-MIP (Raumzuweisung): tageweite Raumpriorität via y[r] + Index-Gewichtung; deterministischer Fallback in Raumreihenfolge
-MIP: AddHint/Heuristik für Startlösung a[c][r], z[(s,r,c)] (schnelle Erstlösung)
-Keine Umbenennungen bestehender Variablen/Parameter (GUI-Stabilität)
-Student-one-per-week bleibt hart und exakt
-CP-Solver berücksichtigt jetzt die Zahl der Räume pro Tag (MIP damit entlastet, neue Helferfunktionen)
-Status-Log-Ausgabe mit mehr Inhalt bei fehlenden Wünschen
-Qualität jetzt als steigender Prozentwert (initial 0 % bis 100 % optimale Lösung)
-Mehr Infos beim Log
-MIP-Log erweitert
-Vordere Räume nicht mehr mit Präferenz
-AddHint entfernt (initiale Heuristik zur Raumvergabe)
-Rollenübergreifende Clusterbildung vermieden (auskommentiert)
-Keine Logdatenausgabe im Terminal
-Kopplung maximal 5er-Blöcke
-"""
-
 import sys
 import pandas as pd
 from collections import defaultdict

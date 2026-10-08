@@ -58,7 +58,7 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 | --- | --- |
 | `KoPlaS.py` | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
 | `kolloPlaner.py` (0.2 Build 13) | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
-| `import_asv.py` (0.1 Build 5) | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
+| `import_asv.py` (0.1 Build 6) | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
 | `export.py` (0.1 Build 11) | Erzeugung der Word-Pläne und Excel-Tabellen |
 | `report.py` (0.3 Build 9) | Erstellung des Word-Statistik- und Belastungsreports |
 
@@ -71,13 +71,15 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.9 (Build 45)**
+**Aktuelle Version: 1.2.9 (Build 46)**
 
 ### Version 1.2.9
 
 - Harte Begrenzung der maximalen Einsatztage zählt Lehrkräfte über Prüfer- und Beisitzerrolle hinweg. Der Solver erkennt belegte Personentage jetzt exakt; leere Beisitzer werden nicht als gemeinsame Person gezählt.
 - In Plan und Parkplatz wird die Schrift des Schülernamens anhand der verfügbaren Zellbreite und -höhe angepasst. Der vollständige Name bleibt bis zu zwei Schriftgrößenstufen erhalten; erst wenn er weiterhin nicht passt, wird die kollisionsbewusste Export-Kurzform verwendet. Thema, Prüfer und Beisitzer bleiben unverändert; Prüfungsblock und Drag-and-drop-Zelle bleiben einteilig.
-- Geprüft: Solverfälle für rollenübergreifende Tagesgrenzen, leere Beisitzer und deaktivierte Tagesgrenze; GUI-Solver-Schnittstelle und Live-Konfliktanzeige; Qt-Messung und Zeichnung der Prüfungsblöcke; Zellinhalt und Drag-and-drop-Payload; Syntax und Modulimporte; ASV-Prüfungsimport.
+- Lehrkräfteimport unterstützt sowohl die bisherige CSV mit UPZ als auch die mehrseitige ASV-Lehrerliste mit Metadaten und wiederholten Tabellenköpfen. Für die Anwendung werden daraus die Kürzel übernommen.
+- UPZ geht nicht mehr in die Belastungsberechnung ein und wird im Lehrkräfte-Dialog nicht mehr angezeigt. Das Feld bleibt intern lesbar, damit ältere gespeicherte Pläne abwärtskompatibel bleiben.
+- Geprüft: Solverfälle für rollenübergreifende Tagesgrenzen, leere Beisitzer und deaktivierte Tagesgrenze; GUI-Solver-Schnittstelle und Live-Konfliktanzeige; Qt-Messung und Zeichnung der Prüfungsblöcke; Zellinhalt und Drag-and-drop-Payload; Syntax und Modulimporte; ASV-Prüfungsimport beider Lehrkräfte-CSV-Formate; Belastungsberechnung unabhängig von UPZ; Tabellen- und Summenspalten des Lehrkräfte-Dialogs.
 
 ### Version 1.2.8
 

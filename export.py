@@ -1,36 +1,5 @@
 Version = "0.1 (Build 11)"
 
-"""
-----------
-ChangeLog
-----------
-Build 1.26: Schülernamen in Lehrer- und Schülerplan anhand der tatsächlichen Textbreite skaliert; lange zusammengesetzte Nachnamen werden bei Bedarf abgekürzt, NTA-Zeiten mitgemessen
-Build 1.25: Sortierung im Lehrerplan an den Schülerplan angeglichen (Raumtext, frühester Slot, bisherige Gruppenreihenfolge)
-Build 1.24: Unnötige Nachnamensauswertung und Excel-Zeitberechnungen entfernt; doppelte Spaltenbreitenschlüssel bereinigt
-Spaltenbreiten angepasst
-Pro Prüfungskommission eine Zeile je Raum
-Neue Überschrift, neue Spaltenbreiten
-Vorbereitung wird berechnet
-NTA wird in Klammern hinzugefügt (in Arial 10)
-Schulname wird in der Kopfzeile hinzugefügt (gelesen aus Oberstufenkurse Header) sowie Anlage 5
-Vorbereitungsraum wurde eingepflegt
-Excel-Export hinzugefügt
-Kommt ein nachname mind. 4mal vor, wird der Vorname abgekürzt hinzugefügt
-Absperrung bei mehr als zwei Themen-Kopplungen hinzugefügt. Raum für Aufsicht ist der Vorbereitungsraum. NTA wird berücksichtigt, falls dadurch Absperrung verkürzt werden kann.
-Thema wird mit ausgegeben
-Tabellenexport Spalten auswählbar
-Wordexport drei Varianten (LK, SuS, Reinigungspersonal)
-Tabellen alle auf Seite zentriert
-
-----------
-Bug-Fix
-----------
-Schulname nicht sauber rechtsbündig, jetzt mit Tabelle gelöst (OK)
-Sortierung nach Räumen und dann nach Zeit
-NTA Berechnung funktioniert wieder
-Umlaute ausgebessert
-"""
-
 import sys
 import json
 from functools import lru_cache

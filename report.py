@@ -1,20 +1,5 @@
 Version = "0.3 (Build 9)"
 
-"""
-Reportschnittstelle
-
-----------
-ChangeLog
-----------
-Build 9: Nicht genutzte Ausrichtungsfunktion entfernt; Quelldateiname wird bei CLI-Reports ausgegeben
-Build 8: Ungenutzte Imports nsmap und WD_SECTION_START entfernt; keine Funktionsänderung
-Erweiterung der LK Tabelle um S, S2, K, K2 und Belastung
-Leere Seite am Ende entfernt
-Zellen in Tabelle zentriert
-Ausgabeinformationen etwas angepasst
-Alle Lehrkräfte werden in Tabelle ausgegeben
-"""
-
 import sys
 import json
 import argparse

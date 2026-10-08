@@ -1,19 +1,4 @@
-Version = "0.1 (Build 5)"
-
-"""
-Importschnittstelle Version 0.1 Build 5
-
-----------
-ChangeLog
-----------
-Build 5: Unbenutzte Werte entfernt, CSV-Helfer aus Zeilenschleifen gezogen und Zahlenkonvertierung gezielter abgesichert
-Import der Prüfungen aus ASV
-Import der Lehrkräfte der Schule (Kürzel) mit UPZ für Belastungsrechnung
-Import der Oberstufenkurse mit WS, Teilnehmer in S und K sowie LF-Kürzel als Zuordnung
-Fach, L-Kennzeichen und CSV-Quellzeile zur gezielten FTU-Auswahl bereitgestellt
-WS bei exakt gleichen Kursbezeichnungen nur beim ersten Auftreten vergeben; Groß-/Kleinschreibung bleibt relevant
-Kursnummer bei Sport (3SMW1 wurde zu 3SMW) behoben
-"""
+Version = "0.1 (Build 6)"
 
 import sys
 import csv
@@ -281,42 +266,44 @@ def main(argv: List[str]) -> int:
 # --- Import: Lehrkräfte ---
 def read_teachers_asv(input_path: str) -> List[Dict[str, str]]:
     """
-    Liest Lehrkräfte aus einer CSV mit den Spalten:
-      - Familienname
-      - Kürzel
-      - UPZ
-    Mapping:
-      Kürzel -> Lehrkraft
-      UPZ -> UPZ
-    'Familienname' wird ignoriert.
-    Rückgabe: Liste von Dicts: {"Lehrkraft": <Kürzel>, "UPZ": <UPZ>}
+    Liest Lehrkraftkürzel aus den alten ASV-CSV-Dateien mit einer Kopfzeile
+    (Familienname, Kürzel, optional UPZ) oder den neuen mehrseitigen
+    Lehrkräfteverzeichnissen (Nr., Kürzel, Lehrkraft, ...).
+
+    Das Rückgabeformat bleibt aus Kompatibilitätsgründen stabil:
+    {"Lehrkraft": <Kürzel>, "UPZ": <Wert oder leer>}. UPZ wird von der
+    Anwendung nicht mehr für die Belastungsberechnung verwendet.
     """
     rows: List[Dict[str, str]] = []
     with open(input_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.reader(f, delimiter=';')
-        header = next(reader, None)
-        if header is None:
-            return rows
-
-        def idx(name: str) -> Optional[int]:
-            try:
-                return header.index(name)
-            except ValueError:
-                return None
-
-        i_kurz = idx("Kürzel")
-        i_upz = idx("UPZ")
-        if i_kurz is None or i_upz is None:
-            return rows
-            #raise ValueError("Erforderliche Header nicht gefunden: 'Name', 'UPZ', 'Kürzel'.")
-
+        i_kurz: Optional[int] = None
+        i_upz: Optional[int] = None
+        new_roster_format = False
         for rec in reader:
-            # Leere oder zu kurze Zeilen überspringen
-            if not rec or all((c or "").strip() == "" for c in rec):
+            cells = [(cell or "").strip() for cell in rec]
+
+            # Der alte Export hat den Kopf in der ersten Zeile. Der neue ASV-
+            # Export enthält Metadaten und wiederholt den Tabellenkopf je Seite.
+            if "Kürzel" in cells and ("UPZ" in cells or "Nr." in cells):
+                i_kurz = cells.index("Kürzel")
+                i_upz = cells.index("UPZ") if "UPZ" in cells else None
+                new_roster_format = i_upz is None
                 continue
-            kuerzel = rec[i_kurz].strip() if i_kurz < len(rec) else ""
-            upz = rec[i_upz].strip() if i_upz < len(rec) else ""
-            if kuerzel == "" and upz == "":
+
+            if i_kurz is None or not cells:
+                continue
+
+            if new_roster_format:
+                # Nur nummerierte Tabellenzeilen sind Datensätze. Damit werden
+                # Seitenköpfe und ASV-Metadaten auch nach jedem Seitenwechsel
+                # sicher ignoriert.
+                if not re.fullmatch(r"\d+\.", cells[0]):
+                    continue
+
+            kuerzel = cells[i_kurz] if i_kurz < len(cells) else ""
+            upz = cells[i_upz] if i_upz is not None and i_upz < len(cells) else ""
+            if not kuerzel:
                 continue
             rows.append({"Lehrkraft": kuerzel, "UPZ": upz})
     return rows
