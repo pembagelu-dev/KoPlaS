@@ -71,12 +71,13 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.9 (Build 44)**
+**Aktuelle Version: 1.2.9 (Build 45)**
 
 ### Version 1.2.9
 
 - Harte Begrenzung der maximalen Einsatztage zählt Lehrkräfte über Prüfer- und Beisitzerrolle hinweg. Der Solver erkennt belegte Personentage jetzt exakt; leere Beisitzer werden nicht als gemeinsame Person gezählt.
-- Geprüft: Solverfälle für rollenübergreifende Tagesgrenzen, leere Beisitzer und deaktivierte Tagesgrenze; GUI-Solver-Schnittstelle und Live-Konfliktanzeige; Syntax und Modulimporte; ASV-Prüfungsimport.
+- In Plan und Parkplatz wird die Schrift des Schülernamens anhand der verfügbaren Zellbreite und -höhe angepasst. Der vollständige Name bleibt bis zu zwei Schriftgrößenstufen erhalten; erst wenn er weiterhin nicht passt, wird die kollisionsbewusste Export-Kurzform verwendet. Thema, Prüfer und Beisitzer bleiben unverändert; Prüfungsblock und Drag-and-drop-Zelle bleiben einteilig.
+- Geprüft: Solverfälle für rollenübergreifende Tagesgrenzen, leere Beisitzer und deaktivierte Tagesgrenze; GUI-Solver-Schnittstelle und Live-Konfliktanzeige; Qt-Messung und Zeichnung der Prüfungsblöcke; Zellinhalt und Drag-and-drop-Payload; Syntax und Modulimporte; ASV-Prüfungsimport.
 
 ### Version 1.2.8
 

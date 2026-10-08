@@ -1,11 +1,12 @@
-Version = "1.2.9 (Build 44)"
+Version = "1.2.9 (Build 45)"
 """
 ----------
 ChangeLog
 ----------
 
-Version 1.2.9 (Build 44)
+Version 1.2.9 (Build 45)
 Solver: Harte Begrenzung der maximalen Einsatztage pro Person zählt Prüfer- und Beisitzertätigkeiten rollenübergreifend; leere Beisitzer werden dabei ignoriert.
+Prüfungsblöcke: Schülernamen werden innerhalb der bestehenden Zelle größenangepasst und bei Bedarf nach der Export-Kurznamenslogik gekürzt.
 
 Version 1.2.8
 ExamsDialog: Tab bestätigt Zelländerungen und öffnet dieselbe editierbare Spalte in der nächsten Zeile
@@ -144,11 +145,11 @@ from typing import List, Dict, Tuple, Optional, Set, Any
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import (
-    Qt, QAbstractTableModel, QModelIndex, QSize, Signal, QObject, QMimeData, QByteArray,
+    Qt, QAbstractTableModel, QModelIndex, QSize, QRectF, Signal, QObject, QMimeData, QByteArray,
     QThread, QEvent, QTimer
 )
 from PySide6.QtGui import (
-    QKeySequence, QAction, QFont, QColor, QPainter, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
+    QKeySequence, QAction, QFont, QFontMetricsF, QColor, QPainter, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView, QAbstractItemDelegate,
@@ -159,6 +160,7 @@ from PySide6.QtWidgets import (
 )
 
 import re
+from functools import lru_cache
 
 # Import der vorhandenen Module (im selben Verzeichnis)
 import kolloPlaner as K  # Solver-Logik (mit LOG_CALLBACK & VERBOSE)
@@ -221,6 +223,116 @@ except Exception:
     BLOCK_HEIGHT_MIN = 24
     EXTRA_WIDTH_EXAMS_DIALOG = 33
     EXTRA_WIDTH_TEACHERS_DIALOG = 24
+
+
+@lru_cache(maxsize=4)
+def _global_student_name_collisions(student_names: Tuple[str, ...]) -> frozenset:
+    """Kollisionsmenge analog zu den späteren Exporten, pro Datenstand gecacht."""
+    rows = [{"Schueler": name} for name in student_names]
+    return frozenset(EXP.collect_global_lastname_collisions(rows))
+
+
+def _student_name_for_block(full_name: str, available_width: float, base_font: QFont,
+                            available_height: float, paint_device,
+                            collision_lastnames: Set[str]) -> Tuple[str, QFont]:
+    """Behält den vollen Namen möglichst lange und nutzt danach die Export-Kürzung."""
+    name = full_name or ""
+    base_size = base_font.pointSizeF()
+    if base_size <= 0:
+        base_size = float(base_font.pointSize() or 9)
+
+    fonts = []
+    for reduction in range(3):
+        font = QFont(base_font)
+        font.setPointSizeF(max(1.0, base_size - reduction))
+        fonts.append(font)
+
+    def fits(candidate: str, font: QFont) -> bool:
+        metrics = QFontMetricsF(font, paint_device)
+        return (
+            metrics.horizontalAdvance(candidate) <= available_width
+            and metrics.lineSpacing() <= available_height
+        )
+
+    for font in fonts:
+        if fits(name, font):
+            return name, font
+
+    # Gleiche Kurzform wie in den Word-Slotplänen (Nachname, bei Kollision Initiale).
+    shortened = EXP.short_student_name(name, collision_lastnames=collision_lastnames)
+    min_font = fonts[-1]
+    while shortened and not fits(shortened, min_font):
+        shorter = EXP._abbreviate_surname_part(shortened)
+        if shorter == shortened:
+            break
+        shortened = shorter
+
+    for font in fonts:
+        if fits(shortened, font):
+            return shortened, font
+    return shortened, min_font
+
+
+def _wrapped_block_line_height(text: str, font: QFont, width: float, paint_device) -> float:
+    metrics = QFontMetricsF(font, paint_device)
+    if not text:
+        return metrics.lineSpacing()
+    bounds = metrics.boundingRect(
+        QRectF(0, 0, max(1.0, width), 10000),
+        Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap,
+        text,
+    )
+    return max(metrics.lineSpacing(), bounds.height())
+
+
+def _draw_exam_block(painter: QPainter, rect, text: str, collision_lastnames: Set[str]) -> None:
+    """Zeichnet drei Informationszeilen getrennt, aber innerhalb derselben Zelle."""
+    lines = (text or "").split("\n", 2)
+    lines = (lines + [""] * (3 - len(lines)))[:3]
+    student, participation, topic = lines
+    base_font = FONT_BLOCK
+    width = max(1.0, float(rect.width()) - 16.0)
+    meta_font = QFont(base_font)
+    participation_height = _wrapped_block_line_height(participation, meta_font, width, painter.device())
+    topic_height = _wrapped_block_line_height(topic, meta_font, width, painter.device())
+    student, student_font = _student_name_for_block(
+        student,
+        width,
+        base_font,
+        max(0.0, float(rect.height()) - participation_height - topic_height),
+        painter.device(),
+        collision_lastnames,
+    )
+
+    student_height = QFontMetricsF(student_font, painter.device()).lineSpacing()
+    total_height = student_height + participation_height + topic_height
+
+    # Standardabstand bleibt erhalten, sofern er in die feste Zeile passt.
+    vertical_padding = 6.0
+    if total_height > max(0.0, float(rect.height()) - 2.0 * vertical_padding):
+        vertical_padding = 0.0
+
+    inner_height = max(0.0, float(rect.height()) - 2.0 * vertical_padding)
+    top = float(rect.top()) + vertical_padding + max(0.0, (inner_height - total_height) / 2.0)
+    painter.save()
+    painter.setPen(Qt.black)
+    painter.setFont(student_font)
+    painter.drawText(
+        QRectF(rect.left() + 8, top, width, student_height),
+        Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextSingleLine,
+        student,
+    )
+    top += student_height
+    painter.setFont(meta_font)
+    for line, line_height in ((participation, participation_height), (topic, topic_height)):
+        painter.drawText(
+            QRectF(rect.left() + 8, top, width, line_height),
+            Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap,
+            line,
+        )
+        top += line_height
+    painter.restore()
+
 
 #Undo/Redo Stacklänge
 MAX_UNDO = 10       #maximal 10 Einträge in der Historie
@@ -1993,6 +2105,9 @@ class RightModel(QAbstractTableModel):
 
     def _recalc(self):
         self.beginResetModel()
+        self.student_name_collisions = _global_student_name_collisions(
+            tuple((exam.Schueler or "").strip() for exam in self.dc.exams)
+        )
         t = self.dc.settings.time
         self.rows = []
         for w in WEEKS:
@@ -2592,11 +2707,13 @@ class RightDelegate(QStyledItemDelegate):
         w, d, s = model.rows[index.row()]
         room = model.rooms[index.column()]
 
-        # Raum-Zellen zeichnen
-        text = index.data(Qt.DisplayRole) or ""
-        inner = opt.rect.adjusted(8, 6, -8, -6)
-        flags = Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap
-        painter.drawText(inner, flags, text)
+        # Raum-Zellen zeichnen; der Schülername bleibt Teil derselben Zelle.
+        _draw_exam_block(
+            painter,
+            opt.rect,
+            index.data(Qt.DisplayRole) or "",
+            getattr(model, "student_name_collisions", frozenset()),
+        )
 
         # Abschlusslinie nach letztem Slot eines Tages
         try:
@@ -2635,6 +2752,9 @@ class ParkingModel(QAbstractTableModel):
 
     def _recalc(self):
         self.beginResetModel()
+        self.student_name_collisions = _global_student_name_collisions(
+            tuple((exam.Schueler or "").strip() for exam in self.dc.exams)
+        )
         self.items = [it.ExamIdx for it in self.dc.schedule if (it.Raum is None or it.Raum == "")]
         # Anzahl Zeilen: deckt alle Items ab
         self._rows = (len(self.items) + self.COLS - 1) // self.COLS if self.items else 0
@@ -2830,13 +2950,13 @@ class ParkingDelegate(QStyledItemDelegate):
         painter.setPen(pen)
         painter.drawRect(opt.rect.adjusted(1, 1, -1, -1))
 
-        # Text
-        painter.setFont(self.font)
-        painter.setPen(Qt.black)
-        text = index.data(Qt.DisplayRole) or ""
-        inner = opt.rect.adjusted(8, 6, -8, -6)
-        flags = Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap
-        painter.drawText(inner, flags, text)
+        # Text: nur der Schülername wird bei Platzbedarf angepasst.
+        _draw_exam_block(
+            painter,
+            opt.rect,
+            index.data(Qt.DisplayRole) or "",
+            getattr(index.model(), "student_name_collisions", frozenset()),
+        )
 
         # Keine Tagesabschlusslinie im Parkplatz
         painter.restore()
