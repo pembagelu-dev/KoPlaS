@@ -1,10 +1,11 @@
-Version = "0.2 (Build 13)"
+Version = "0.2 (Build 17)"
 
 import sys
 import pandas as pd
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import time
 from ortools.sat.python import cp_model
 
 from import_asv import parse_csv, to_long_format
@@ -90,6 +91,22 @@ def status_to_str(status):
         cp_model.UNKNOWN: "UNBEKANNT",
     }.get(status, str(status))
 
+def format_feedback(report):
+    """Ein Bericht für CLI und kopierbare GUI-Dialogdetails."""
+    lines = [report.get("summary", ""), f"Status: {report.get('status', 'unbekannt')}"]
+    for key, title in (("findings", "Konkrete Befunde / Modellgrenzen"),
+                       ("suggestions", "Nächste Schritte / geprüfte Änderungen"),
+                       ("wishes", "Wünsche und Abweichungen"),
+                       ("room_notes", "Raumvergabe")):
+        values = report.get(key, [])
+        if values:
+            lines.append(title + ":")
+            lines.extend("• " + value for value in values)
+    if report.get("status") in ("ZULÄSSIG", "OPTIMAL") and not report.get("wishes"):
+        lines.append("Keine Abweichungen bei den ausgewerteten Schülerabständen, Startwünschen und Tageszielwerten. "
+                     "Dies ist keine Aussage, dass alle Raum- und Kompaktheitsziele ihr Minimum erreichen.")
+    return "\n".join(lines)
+
 def parse_day_token(token: str) -> Tuple[int, int]:
     token = token.strip()
     if len(token) < 3:
@@ -172,6 +189,12 @@ class ColloquiumScheduler:
         self.exams = exams
         self.params = params
         self.config = config
+        # Separater Bericht; solve() und extract_schedule() behalten ihre API.
+        self.feedback = {"status": None, "summary": "", "findings": [],
+                         "suggestions": [], "wishes": [], "room_notes": []}
+        # Die GUI zeigt den vollständigen Bericht im Ergebnisdialog.
+        self.log_detailed_feedback = True
+        self._diagnostic_allow_gaps = False
         self.unavailability = unavailability
         self.no_exam_days = no_exam_days
 
@@ -215,10 +238,10 @@ class ColloquiumScheduler:
                "| Slots gesamt:", len(self.all_slots),
                "| Erlaubte Tage:", len({(w, d) for (w, d, _) in self.all_slots}))
         if self.no_exam_days:
-            vprint("[Init] No-Exam-Days:", ", ".join(f"{DAYS[d]}{w}" for (w, d) in sorted(self.no_exam_days)))
+            vprint("[Init] Tage ohne Prüfung:", ", ".join(f"{DAYS[d]}{w}" for (w, d) in sorted(self.no_exam_days)))
         try:
             if getattr(self.config, "ignore_empty_beisitzer", False):
-                vprint("[Init] Hinweis: Leere Beisitzer werden ignoriert (keine Konflikte/Cluster/Permutation/Room-Cluster).")
+                vprint("[Init] Hinweis: Leere Beisitzer werden ignoriert")
         except Exception:
             pass
 
@@ -258,7 +281,7 @@ class ColloquiumScheduler:
             if not self.config.ignore_empty_beisitzer or (e.beisitzer and e.beisitzer.strip() != ""):
                 beisitzer[e.beisitzer].append(e)
 
-        vprint("  - Erkannte Konfliktgruppen:",
+        vprint("[Constraints] Erkannte Konfliktgruppen:",
                f"Schüler: {sum(1 for v in students.values() if len(v) > 1)},",
                f"Prüfer: {sum(1 for v in pruefer.values() if len(v) > 1)},",
                f"Beisitzer: {sum(1 for v in beisitzer.values() if len(v) > 1)}")
@@ -277,7 +300,7 @@ class ColloquiumScheduler:
             if not self.config.ignore_empty_beisitzer or (e.beisitzer and e.beisitzer.strip() != ""):
                 role_union[e.beisitzer].append(e)
 
-        vprint("  - Personen mit mehreren Rollen am selben Tag (potenziell kritisch):",
+        vprint("[Constraints] Personen mit mehreren Rollen am selben Tag (potenziell kritisch):",
                sum(1 for v in role_union.values() if len(v) > 1))
         for _, exs in role_union.items():
             if len(exs) <= 1:
@@ -317,9 +340,9 @@ class ColloquiumScheduler:
                 # Duplikate entfernen und sortieren
                 uniq = sorted(set(perm_pairs_list))
                 formatted = ", ".join([f"({p},{b})" for (p, b) in uniq])
-                vprint(f"  - Paare mit wechselseitigen Rollen (besonders zu beachten): {perm_pairs} -> {formatted}")
+                vprint(f"[Constraints] Paare mit wechselseitigen Rollen (besonders zu beachten): {perm_pairs} -> {formatted}")
             except Exception:
-                vprint(f"  - Paare mit wechselseitigen Rollen (besonders zu beachten): {perm_pairs}")
+                vprint(f"[Constraints] Paare mit wechselseitigen Rollen (besonders zu beachten): {perm_pairs}")
         
         #Kapazitätsgrenze je globalem Slot: nicht mehr Prüfungen parallel als Räume vorhanden
         R = len(self.params.rooms) if getattr(self.params, "rooms", None) else 0
@@ -333,7 +356,7 @@ class ColloquiumScheduler:
 
     def add_hard_constraints(self):
         vprint("[Constraints] Harte Regeln werden angewendet ")
-        vprint("  - Einstellungen:",
+        vprint("[Constraints] Einstellungen:",
                f"pro Schüler/Woche genau 1: {self.config.hard_student_one_per_week},",
                f"Kopplung: {self.config.hard_grouping_enabled} (Größe={self.config.grouping_block_size}),",
                f"Abwesenheiten: {self.config.hard_unavailability},",
@@ -487,6 +510,8 @@ class ColloquiumScheduler:
 
         # 8) Keine Lücken pro Prüfer/Tag (hart) – effizient via gemeinsamen b-Vektoren
         for teacher, _ in exams_by_teacher.items():
+            if self._diagnostic_allow_gaps:
+                continue
             for (w, d), day_slots in self.day_to_gslots.items():
                 key = (teacher, w, d)
                 if key not in self._teacher_day_struct:
@@ -630,6 +655,10 @@ class ColloquiumScheduler:
                 i_bp += 1
 
             for (e1, e2) in pairs:
+                if not hasattr(self, "_permutation_pairs"):
+                    self._permutation_pairs = []
+                if (e1, e2) not in self._permutation_pairs and (e2, e1) not in self._permutation_pairs:
+                    self._permutation_pairs.append((e1, e2))
                 t1 = self.model.NewIntVar(0, num_slots_all - 1, f"perm_t1_e{e1.idx}_e{e2.idx}")
                 t2 = self.model.NewIntVar(0, num_slots_all - 1, f"perm_t2_e{e1.idx}_e{e2.idx}")
                 self.model.Add(t1 == sum(g * self.x[(e1.idx, g)] for g in range(num_slots_all)))
@@ -762,6 +791,225 @@ class ColloquiumScheduler:
         added_terms = len(self.soft_terms) - before_terms
         vprint(f"[Constraints] Weiche Ziele ergänzt (+{added_terms}).")
 
+    def _available_days(self, exam):
+        """Tatsächliche Tagesdomäne einer Prüfung, nach Sperren und Abwesenheiten."""
+        days = {day for day, slots in self.day_to_gslots.items() if slots}
+        if self.config.hard_unavailability:
+            days -= self.unavailability.get(exam.pruefer, set())
+            days -= self.unavailability.get(exam.beisitzer, set())
+        return days
+
+    def _infeasibility_findings(self):
+        """Nur notwendige Bedingungen melden; keine Regel ohne Beleg beschuldigen."""
+        findings = []
+        def tag(day):
+            return f"{DAYS[day[1]]}{day[0]}"
+        capacity = len(self.all_slots) * len(self.params.rooms)
+        if len(self.exams) > capacity:
+            findings.append(f"Raumkapazität: {len(self.exams)} Prüfungen, aber nur {capacity} "
+                            "Plätze. Ergänzen Sie Räume oder Slots oder geben Sie weitere Prüfungstage frei "
+                            "(Einstellungen → Räume/Zeit/Bedingungen).")
+        domains = {e.idx: self._available_days(e) for e in self.exams}
+        students = defaultdict(list)
+        for e in self.exams:
+            students[e.schueler].append(e)
+            if not domains[e.idx]:
+                findings.append(f"Prüfung #{e.idx}: {e.schueler}, {e.fach}, Prüfer {e.pruefer}, "
+                                f"Beisitzer {e.beisitzer or 'leer'}: kein gemeinsamer Prüfungstag. "
+                                "Prüfen Sie Abwesenheiten und Tagessperren (Einstellungen → Bedingungen) "
+                                "sowie die Slotzahl (Einstellungen → Zeit).")
+            if e.pruefer and e.pruefer == e.beisitzer:
+                findings.append(f"Prüfung #{e.idx} ({e.schueler}, {e.fach}): {e.pruefer} ist zugleich "
+                                "Prüfer und Beisitzer. Weisen Sie unterschiedliche Lehrkräfte zu.")
+        for person, exams in self._exams_by_teacher.items():
+            days = set().union(*(domains[e.idx] for e in exams))
+            limit = 5 if person in self.config.teachers_allow_5_per_day else self.config.default_max_per_day
+            capacities = sorted((min(limit, len(self.day_to_gslots[day])) for day in days), reverse=True)
+            max_days = len(days)
+            if self.config.hard_max_days_per_teacher_enabled and self.config.hard_max_days_per_teacher_K is not None:
+                max_days = min(max_days, max(0, self.config.hard_max_days_per_teacher_K))
+                capacities = capacities[:max(0, self.config.hard_max_days_per_teacher_K)]
+            possible = sum(capacities)
+            if len(exams) > possible:
+                p = sum(e.pruefer == person for e in exams)
+                b = sum(e.beisitzer == person for e in exams)
+                cause = f"maximal {limit} Prüfungen pro Tag an {max_days} möglichen Einsatztagen"
+                if possible < limit * max_days:
+                    cause += "; begrenzt durch die verfügbaren Slots"
+                findings.append(f"Lehrkraft {person or '(leeres Kürzel)'}: {len(exams)} Einsätze "
+                                f"({p} als Prüfer, {b} als Beisitzer). Mit den aktuellen Einstellungen "
+                                f"sind höchstens {possible} möglich ({cause}). "
+                                "Prüfen Sie Tageslimit, Einsatztage und Abwesenheiten (Einstellungen → Bedingungen) "
+                                "oder ändern Sie die Ausschussbesetzung. Zusätzliche Räume helfen hier nicht.")
+            # Kapazität innerhalb einer eingeschränkten Tagesmenge: andere Einsätze
+            # derselben Person können nicht auf zusätzliche Tage ausweichen.
+            for restricted in {frozenset(domains[e.idx]) for e in exams}:
+                if not restricted or restricted == days:
+                    continue
+                forced = [e for e in exams if domains[e.idx] <= restricted]
+                available = sum(min(limit, len(self.day_to_gslots[d])) for d in restricted)
+                if len(forced) > available:
+                    findings.append(f"Lehrkraft {person}: {len(forced)} Einsätze müssen auf "
+                                    f"{', '.join(map(tag, sorted(restricted)))} liegen, dort sind nur "
+                                    f"{available} möglich. Erhöhen Sie das Tageslimit oder ermöglichen Sie "
+                                    "weitere gemeinsame Prüfungstage (Einstellungen → Bedingungen).")
+        for student, exams in students.items():
+            weeks = {w for w, _ in set().union(*(domains[e.idx] for e in exams))}
+            # Entspricht der exakten Wochenregel des Modells: je Woche mit Slots = 1.
+            model_weeks = {w for w, _, _ in self.all_slots}
+            if self.config.hard_student_one_per_week:
+                if len(exams) != len(model_weeks):
+                    findings.append(f"Schüler {student}: {len(exams)} Prüfungen, aber die Regel "
+                                    f"„Genau eine Prüfung pro Woche“ verlangt {len(model_weeks)}. "
+                                    "Prüfen Sie die Prüfungsdaten oder deaktivieren Sie diese Regel unter Bedingungen.")
+                missing = model_weeks - weeks
+                if missing:
+                    findings.append(f"Schüler {student}: keine Prüfung kann in Woche "
+                                    f"{', '.join(map(str, sorted(missing)))} stattfinden, obwohl dort genau "
+                                    "eine verlangt wird. Prüfen Sie Abwesenheiten, Tagessperren oder die Wochenregel.")
+            gap = self.config.hard_min_gap_days_same_student
+            if gap is not None and len(exams) > 1:
+                for i, first in enumerate(exams):
+                    for second in exams[i + 1:]:
+                        distances = [abs((w1 - w2) * 7 + d1 - d2)
+                                     for w1, d1 in domains[first.idx] for w2, d2 in domains[second.idx]
+                                     if not self.config.hard_student_one_per_week or w1 != w2]
+                        if distances and max(distances) < gap:
+                            findings.append(f"Schüler {student}, Prüfungen #{first.idx}/#{second.idx}: "
+                                            f"höchstens {max(distances)} Tage Abstand möglich, gefordert {gap}. "
+                                            "Verringern Sie den Mindestabstand oder ermöglichen Sie weitere "
+                                            "Prüfungstage (Einstellungen → Bedingungen).")
+        if self.config.hard_grouping_enabled and self.config.grouping_block_size in (2, 3, 4, 5):
+            size = self.config.grouping_block_size
+            for (topic, subject, teacher), exams in group_exams_for_blocking(self.exams).items():
+                exams = sorted(exams, key=lambda e: e.schueler)
+                for start in range(0, len(exams), size):
+                    chunk = exams[start:start + size]
+                    if len(chunk) < 2:
+                        continue
+                    # Ohne langen Tag überspringt das bestehende Modell den Block.
+                    if not any(len(slots) >= len(chunk) for slots in self.day_to_gslots.values()):
+                        continue
+                    common = set.intersection(*(domains[e.idx] for e in chunk))
+                    common = {d for d in common if len(self.day_to_gslots[d]) >= len(chunk)}
+                    if not common:
+                        findings.append(f"Kopplungsblock {subject}, Thema „{topic}“, Prüfer {teacher}, "
+                                        f"kein gemeinsamer Tag mit {len(chunk)} aufeinanderfolgenden Slots. "
+                                        "Prüfen Sie Abwesenheiten, Slotzahl oder Kopplung.")
+        return findings
+
+    def _probe_changes(self):
+        """Bis zu 12 s Suchzeit plus Modellaufbau; Einstellungen und Hauptmodell bleiben erhalten.
+
+        FEASIBLE ist ein Nachweis für das geänderte Zeitmodell, UNKNOWN keine Aussage.
+        Raumkonstanz wird erst bei der anschließenden Raumvergabe geprüft.
+        """
+        variants = []
+        c = self.config
+        if c.hard_max_days_per_teacher_enabled and c.hard_max_days_per_teacher_K is not None:
+            variants.append((f"Maximale Einsatztage von {c.hard_max_days_per_teacher_K} auf "
+                             f"{c.hard_max_days_per_teacher_K + 1} erhöhen",
+                             replace(c, hard_max_days_per_teacher_K=c.hard_max_days_per_teacher_K + 1), self.no_exam_days, False))
+        if c.hard_min_gap_days_same_student is not None and c.hard_min_gap_days_same_student > 0:
+            variants.append((f"Harten Schülerabstand von {c.hard_min_gap_days_same_student} auf "
+                             f"{c.hard_min_gap_days_same_student - 1} Tage verringern",
+                             replace(c, hard_min_gap_days_same_student=c.hard_min_gap_days_same_student - 1), self.no_exam_days, False))
+        if c.hard_grouping_enabled:
+            variants.append(("Harte Kopplung deaktivieren", replace(c, hard_grouping_enabled=False), self.no_exam_days, False))
+        if c.hard_student_one_per_week:
+            variants.append(("Regel „Genau eine Prüfung pro Woche“ deaktivieren", replace(c, hard_student_one_per_week=False), self.no_exam_days, False))
+        variants.append((f"Standard-Tageslimit von {c.default_max_per_day} auf {c.default_max_per_day + 1} erhöhen",
+                         replace(c, default_max_per_day=c.default_max_per_day + 1), self.no_exam_days, False))
+        for day in sorted(self.no_exam_days):
+            variants.append((f"Prüfungstag {DAYS[day[1]]}{day[0]} freigeben", c, self.no_exam_days - {day}, False))
+        if c.hard_unavailability and self.unavailability:
+            variants.append(("Abwesenheiten vollständig deaktivieren (nur Diagnose)", replace(c, hard_unavailability=False), self.no_exam_days, False))
+        # Vorrangig erkennen, ob die nicht einstellbare Lückenregel beteiligt ist.
+        variants.insert(0, ("Lücken zwischen Personeneinsätzen erlauben (nur Diagnose, derzeit kein GUI-Schalter)", c, self.no_exam_days, True))
+        variants = [(*variant, self.params) for variant in variants]
+        extra_room = "Zusätzlicher Diagnoseraum"
+        while extra_room in self.params.rooms:
+            extra_room += "_"
+        variants.insert(2, ("Einen zusätzlichen Raum bereitstellen", c, self.no_exam_days, False,
+                            replace(self.params, rooms=list(self.params.rooms) + [extra_room])))
+        variants.insert(3, ("Einen zusätzlichen Slot je vorhandenem Prüfungstag bereitstellen", c,
+                            self.no_exam_days, False,
+                            replace(self.params, slots_per_day={day: slots + 1 if slots > 0 else 0
+                                                               for day, slots in self.params.slots_per_day.items()})))
+        results = []
+        deadline = time.monotonic() + 12
+        for label, config, blocked, allow_gaps, params in variants:
+            if time.monotonic() >= deadline:
+                break
+            vprint(f"Diagnoseversuch (separate Kopie): {label}")
+            trial = ColloquiumScheduler(self.exams, params, config, self.unavailability, blocked)
+            trial._diagnostic_allow_gaps = allow_gaps
+            trial.add_basic_constraints()
+            trial.add_hard_constraints()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            probe = cp_model.CpSolver()
+            probe.parameters.max_time_in_seconds = min(2.0, remaining)
+            probe.parameters.num_search_workers = 1
+            result = probe.Solve(trial.model)
+            if result in (cp_model.FEASIBLE, cp_model.OPTIMAL):
+                results.append(f"Erfolgreich geprüft: {label}. Ein Zeitplan ist damit möglich.")
+            elif result == cp_model.INFEASIBLE:
+                results.append(f"Nicht ausreichend: {label} löst den Konflikt allein nicht.")
+            else:
+                results.append(f"Ungeklärt: {label}; im Diagnosezeitbudget keine Entscheidung.")
+        if len(results) < len(variants):
+            results.append("Weitere Varianten wurden wegen des Diagnosezeitbudgets nicht untersucht.")
+        return results
+
+    def _solution_wishes(self, solver):
+        """Konkrete Abweichungen von messbaren Wünschen, aus der gültigen Lösung."""
+        assigned = {e.idx: next(self.all_slots[g] for g in range(len(self.all_slots))
+                               if solver.BooleanValue(self.x[(e.idx, g)])) for e in self.exams}
+        wishes = []
+        desired = self.config.soft_desired_gap_days_same_student
+        if desired is not None:
+            students = defaultdict(list)
+            for e in self.exams:
+                students[e.schueler].append(e)
+            for student, exams in students.items():
+                for i, first in enumerate(exams):
+                    for second in exams[i + 1:]:
+                        w1, d1, _ = assigned[first.idx]
+                        w2, d2, _ = assigned[second.idx]
+                        gap = abs((w1 - w2) * 7 + d1 - d2)
+                        if gap < desired:
+                            wishes.append(f"Schülerabstand {student}, {first.fach}/{second.fach}: "
+                                          f"{gap} statt gewünschter {desired} Tage.")
+        if self.config.soft_prefer_second_slot_start:
+            for person, exams in self._exams_by_teacher.items():
+                starts = {}
+                for e in exams:
+                    w, d, slot = assigned[e.idx]
+                    starts[(w, d)] = min(starts.get((w, d), slot), slot)
+                for (w, d), slot in sorted(starts.items()):
+                    if slot != 1:
+                        wishes.append(f"Startwunsch: {person or '(leeres Kürzel)'}, {DAYS[d]}{w}: "
+                                      f"Beginn in Slot {slot + 1} statt Slot 2.")
+        if DAY_WEIGHT_BALANCE > 0:
+            for day, target in getattr(self, "_day_targets", {}).items():
+                actual = sum(assigned[e.idx][:2] == day for e in self.exams)
+                if actual != target:
+                    wishes.append(f"Tagesverteilung: {DAYS[day[1]]}{day[0]}: {actual} Prüfungen "
+                                  f"statt Zielwert {target}.")
+        # Nur tatsächlich in add_soft_constraints() optimierte Permutationspaare
+        # auswerten, statt alle beliebigen Rollentauschkombinationen zu behaupten.
+        for first, second in getattr(self, "_permutation_pairs", []):
+            pos1 = self.all_slots.index(assigned[first.idx])
+            pos2 = self.all_slots.index(assigned[second.idx])
+            distance = abs(pos1 - pos2)
+            if distance > 1:
+                wishes.append(f"Nähe bei Rollentausch {first.pruefer}/{first.beisitzer}: "
+                              f"Prüfungen #{first.idx}/#{second.idx} haben {distance} Zeitplätze Abstand "
+                              "statt direkt benachbarter Zeitplätze.")
+        return wishes
+
     def solve(self, time_limit_sec: Optional[int] = 60):
         vprint("Solver gestartet")
         if self.soft_terms:
@@ -829,28 +1077,15 @@ class ColloquiumScheduler:
                     else:
                        qual_str = "n/a"
                     day_dev_str = "" if day_dev is None else str(int(day_dev))
-                    peak_par = self._peak_parallel_exams()
                     vprint(
                         f"Laufzeit {elapsed:.0f}s | {self.solution_count} Lösungen | Qualität {qual_str} | "
                         f"Tage: {days_used}/{days_total} belegt | "
                         f"Tagesverteilung: Abw. {day_dev_str} | Abstand(Std): {gap_issues} | "
-                        f"Startwunsch: {start_issues} | genutzte Räume: {rooms_used} | Max. parallele Prüfungen: {peak_par}"
+                        f"Startwunsch: {start_issues} | genutzte Räume: {rooms_used}"
                     )
                     self.last_logged_time = now
                     if curr_obj is not None:
                         self.last_logged_obj = curr_obj
-
-            # Zusatz: grobe Parallelitätsdiagnose (max. parallele Prüfungen über alle Slots)
-            def _peak_parallel_exams(self):
-                try:
-                    max_par = 0
-                    for gslot_idx, _ in enumerate(self.outer.all_slots):
-                        par = sum(self.Value(self.outer.x[(e.idx, gslot_idx)]) for e in self.outer.exams)
-                        if par > max_par:
-                            max_par = par
-                    return max_par
-                except Exception:
-                    return 0
 
             def _compute_live_indicators(self):
                 days_used = 0
@@ -870,11 +1105,9 @@ class ColloquiumScheduler:
                 if self.outer.config.soft_desired_gap_days_same_student is not None:
                     desired = self.outer.config.soft_desired_gap_days_same_student
                     ord_map = {}
-                    ordinal = 0
                     for w in WEEKS:
                         for d in range(5):
-                            ord_map[(w, d)] = ordinal
-                            ordinal += 1
+                            ord_map[(w, d)] = (w - 1) * 7 + d
                     e_to_day = {}
                     for e in self.outer.exams:
                         gs = None
@@ -934,18 +1167,6 @@ class ColloquiumScheduler:
 
                 return days_used, days_total, day_dev, gap_issues, start_issues, rooms_used
 
-            # --- NEU: Helfer zur Ermittlung der maximalen Parallelität ---
-            def _max_parallel_load(self):
-                max_par = 0
-                try:
-                    for gslot_idx, _ in enumerate(self.outer.all_slots):
-                        par = sum(self.Value(self.outer.x[(e.idx, gslot_idx)]) for e in self.outer.exams)
-                        if par > max_par:
-                            max_par = par
-                except Exception:
-                    pass
-                return max_par
-
         cb = FriendlyProgress(self)
 
         solver.parameters.log_search_progress = False
@@ -953,173 +1174,45 @@ class ColloquiumScheduler:
 
         status = solver.Solve(self.model, cb)
 
-        def summarize_violations(solver_obj: cp_model.CpSolver, status_code):
-            tag = lambda w, d: f"{DAYS[d]} (Woche {w})"
-            unfulfilled_hard = []
-            relaxed_soft_info = []
-
-            if status_code == cp_model.INFEASIBLE:
-                if self.config.hard_no_exam_days_enabled and self.no_exam_days:
-                    unfulfilled_hard.append("Es gibt komplett verbotene Tage, die den Spielraum stark einschränken.")
-                if self.config.hard_unavailability and self.unavailability:
-                    unfulfilled_hard.append("Abwesenheiten (Prüfer/Beisitzer) überschneiden sich mit anderen Regeln.")
-                if self.config.hard_grouping_enabled:
-                    unfulfilled_hard.append(f"Kopplungsblöcke (Größe {self.config.grouping_block_size}) sind unter den anderen Regeln nicht unterzubringen.")
-                if self.config.hard_max_days_per_teacher_enabled:
-                    unfulfilled_hard.append(f"Begrenzung der maximalen Einsatztage pro Person (K={self.config.hard_max_days_per_teacher_K}) ist zu streng.")
-                unfulfilled_hard.append("Mindestens eine Person ist gleichzeitig an zwei Prüfungen beteiligt oder wechselseitige Rollenpaare blockieren sich.")
-                return unfulfilled_hard, relaxed_soft_info
-
-            # Soft-Verletzungen nur prüfen, wenn eine gültige Lösung existiert
-            if status_code not in (cp_model.FEASIBLE, cp_model.OPTIMAL):
-                return unfulfilled_hard, relaxed_soft_info
- 
-            if self.config.soft_desired_gap_days_same_student is not None:
-                desired = self.config.soft_desired_gap_days_same_student
-                by_student = defaultdict(list)
-                for e in self.exams:
-                    by_student[e.schueler].append(e)
-                ord_map = {}
-                ordinal = 0
-                for w in WEEKS:
-                    for d in range(5):
-                        ord_map[(w, d)] = ordinal
-                        ordinal += 1
-                e_to_day = {}
-                for e in self.exams:
-                    gs = None
-                    for gslot, (w, d, s) in enumerate(self.all_slots):
-                        if solver_obj.BooleanValue(self.x[(e.idx, gslot)]):
-                            gs = (w, d)
-                            break
-                    e_to_day[e.idx] = gs
-                too_close = 0
-                for _, exs in by_student.items():
-                    if len(exs) <= 1:
-                        continue
-                    ords = []
-                    for e in exs:
-                        wd = e_to_day.get(e.idx)
-                        if wd is not None:
-                            ords.append(ord_map[wd])
-                    ords.sort()
-                    for i in range(len(ords)-1):
-                        if abs(ords[i+1] - ords[i]) < desired:
-                            too_close += 1
-                            break
-                if too_close > 0:
-                    relaxed_soft_info.append(f"Gewünschter Mindestabstand zwischen Prüfungen desselben Schülers wurde nicht immer erreicht (betroffen: {too_close} Schüler-Gruppen).")
-
-            if self.config.soft_prefer_second_slot_start:
-                not_ideal_starts = 0
-                exams_by_teacher = defaultdict(list)
-                for e in self.exams:
-                    exams_by_teacher[e.pruefer].append(e)
-                for teacher, exs in exams_by_teacher.items():
-                    for (w, d), day_slots in self.day_to_gslots.items():
-                        b = []
-                        for _, gslot in enumerate(day_slots):
-                            active = sum(solver_obj.BooleanValue(self.x[(e.idx, gslot)]) for e in exs)
-                            b.append(1 if active >= 1 else 0)
-                        if any(b):
-                            try:
-                                start_pos = b.index(1)
-                                if start_pos != 1:
-                                    not_ideal_starts += 1
-                            except ValueError:
-                                pass
-                if not_ideal_starts > 0:
-                    relaxed_soft_info.append("Einige Prüfer beginnen ihren Tagesblock nicht im gewünschten zweiten Slot.")
-
-            compact_issues = 0
-            exams_by_teacher = defaultdict(list)
-            for e in self.exams:
-                exams_by_teacher[e.pruefer].append(e)
-            for teacher, exs in exams_by_teacher.items():
-                for (w, d), day_slots in self.day_to_gslots.items():
-                    b = []
-                    for _, gslot in enumerate(day_slots):
-                        active = sum(solver_obj.BooleanValue(self.x[(e.idx, gslot)]) for e in exs)
-                        b.append(1 if active >= 1 else 0)
-                    if sum(b) >= 2:
-                        try:
-                            first = b.index(1)
-                            last = len(b) - 1 - b[::-1].index(1)
-                            if any(val == 0 for val in b[first:last+1]):
-                                compact_issues += 1
-                        except ValueError:
-                            pass
-            if compact_issues > 0:
-                relaxed_soft_info.append("Einige Prüfer haben innerhalb eines Tages kleine Pausen zwischen Prüfungen.")
-
-            if hasattr(self, "_day_count_vars") and self._day_count_vars:
-                counts = {}
-                for (w, d), var in self._day_count_vars.items():
-                    counts[(w, d)] = solver_obj.Value(var)
-                allowed_days = sorted(counts.keys())
-                if allowed_days:
-                    total_exams = len(self.exams)
-                    num_days = len(allowed_days)
-                    base_target = total_exams // num_days
-                    remainder = total_exams - base_target * num_days
-                    targets = {}
-                    for i, (w, d) in enumerate(allowed_days):
-                        targets[(w, d)] = base_target + (1 if i < remainder else 0)
-                    total_dev = sum(abs(counts[(w, d)] - targets[(w, d)]) for (w, d) in allowed_days)
-                    if total_dev > 0:
-                        examples = []
-                        for (w, d) in allowed_days[:3]:
-                            if counts[(w, d)] != targets[(w, d)]:
-                                examples.append(f"{DAYS[d]} (Woche {w}): {counts[(w,d)]} statt {targets[(w,d)]}")
-                        if examples:
-                            relaxed_soft_info.append("Prüfungen sind nicht ganz gleichmäßig auf die Tage verteilt (z. B. " + "; ".join(examples) + ").")
-                        else:
-                            relaxed_soft_info.append("Prüfungen sind nicht ganz gleichmäßig auf die Tage verteilt.")
-
-            return unfulfilled_hard, relaxed_soft_info
-
-        if status == cp_model.OPTIMAL:
-            vprint("Ergebnis: Sehr guter Plan gefunden. Feste Regeln eingehalten, Wünsche weitgehend berücksichtigt.")
-        elif status == cp_model.FEASIBLE:
-            vprint("Ergebnis: Gültiger Plan gefunden. Feste Regeln eingehalten, einige Wünsche nur teilweise erfüllt.")
+        report = self.feedback
+        report.update(status=status_to_str(status), findings=[], suggestions=[], wishes=[], room_notes=[])
+        if status in (cp_model.FEASIBLE, cp_model.OPTIMAL):
+            report["summary"] = ("Gültiger Zeitplan gefunden; alle im Zeitmodell erzwungenen harten Regeln eingehalten. "
+                                 + ("Gewichtete Ziele optimal für dieses Modell." if status == cp_model.OPTIMAL
+                                    else "Die bestmögliche Qualität ist noch nicht nachgewiesen."))
+            report["wishes"] = self._solution_wishes(solver)
+            if self.config.hard_grouping_enabled and self.config.grouping_block_size in (2, 3, 4, 5):
+                size = self.config.grouping_block_size
+                for key, exams in group_exams_for_blocking(self.exams).items():
+                    exams = sorted(exams, key=lambda e: e.schueler)
+                    for start in range(0, len(exams), size):
+                        chunk = exams[start:start + size]
+                        if len(chunk) > 1 and not any(len(slots) >= len(chunk) for slots in self.day_to_gslots.values()):
+                            report["findings"].append(f"Kopplung nicht erzwungen: Thema „{key[0]}“, Fach {key[1]}, "
+                                                      f"Prüfer {key[2]}: kein Tag hat {len(chunk)} Slots. "
+                                                      "Prüfen Sie Slotzahl oder Blockgröße.")
+            if self.config.soft_minimize_rooms_used:
+                report["wishes"].append("Wunsch „Min. Räume“: Der Schalter hat derzeit keine eigene Wirkung im Solver.")
         elif status == cp_model.INFEASIBLE:
-            vprint("Ergebnis: Es konnte kein gültiger Plan erstellt werden.")
+            report["summary"] = "Mit den aktuellen Daten und harten Regeln ist kein Zeitplan möglich (nachgewiesen)."
+            report["findings"] = self._infeasibility_findings()
+            if not report["findings"]:
+                report["findings"].append("Keine einzelne Engstelle erkannt; Regelkombinationen wurden geprüft. "
+                                          "Personeneinsätze müssen pro Tag lückenlos liegen.")
+                vprint(report["findings"][0])
+                report["suggestions"] = self._probe_changes()
+                report["suggestions"].insert(0, "Nur das Zeitmodell wurde geprüft; Einstellungen bleiben unverändert. "
+                                            "Raumvergabe und Wünsche sind noch nicht geprüft.")
+            else:
+                report["suggestions"].append("Beheben Sie zuerst die genannten Engstellen. "
+                                             "Weitere Konflikte können bestehen bleiben.")
+        elif status == cp_model.MODEL_INVALID:
+            report["summary"] = "Das Solvermodell ist ungültig; dies ist kein Nachweis unlösbarer Prüfungsdaten."
+            report["findings"].append(self.model.Validate() or solver.ResponseStats())
         else:
-            vprint("Ergebnis: Kein Plan rechtzeitig gefunden. Bitte mehr Rechenzeit geben oder Wünsche vereinfachen.")
-
-        # Diagnose: tatsächlichen Status einmal ausgeben
-        vprint(f"Status: {status}")
- 
-        unfulfilled_hard, relaxed_soft_info = summarize_violations(solver, status)
-
-        if status == cp_model.INFEASIBLE:
-            if unfulfilled_hard:
-                vprint("Vermutete Engstellen (harte Regeln):")
-                for msg in unfulfilled_hard:
-                    vprint(f"   {msg}")
-            else:
-                vprint("Keine spezifischen Engstellen identifiziert, aber der Plan ist unlösbar.")
-            vprint("Vorschläge:")
-            vprint("   Prüfen Sie Abwesenheiten, verbotene Tage, Rollenüberschneidungen und Tageslimits.")
-            vprint("   Reduzieren oder lockern Sie die strengsten Regeln minimal und starten Sie erneut.")
-        elif status in (cp_model.FEASIBLE, cp_model.OPTIMAL):
-            # Sicherstellen, dass wir eine Liste haben
-            if relaxed_soft_info is None:
-                relaxed_soft_info = []
-            elif not isinstance(relaxed_soft_info, (list, tuple)):
-                relaxed_soft_info = list(relaxed_soft_info)
-        
-            if len(relaxed_soft_info) > 0:
-                # Sammellog als eine einzige vprint-Zeile, um Throttling/Timing-Probleme in der GUI zu vermeiden
-                try:
-                    header = "Wünsche, die nicht vollständig erfüllt wurden:"
-                    body = "\n".join(f"   {msg}" for msg in relaxed_soft_info)
-                    vprint(f"{header}\n{body}")
-                except Exception:
-                    # Fallback: einfache, kompakte Ein-Zeilen-Ausgabe
-                    vprint("Wünsche, die nicht vollständig erfüllt wurden: " + " | ".join(relaxed_soft_info))
-            else:
-                vprint("Alle wichtigen Wünsche wurden gut berücksichtigt.")
+            report["summary"] = "Innerhalb der Rechenzeit wurde kein Plan gefunden; Unlösbarkeit ist nicht nachgewiesen."
+            report["suggestions"].append("Erhöhen Sie die CP-Rechenzeit (Einstellungen → Bedingungen).")
+        vprint(format_feedback(report) if self.log_detailed_feedback else report["summary"])
         return solver, status
 
     def assign_rooms_for_day_mip(self,
@@ -1236,7 +1329,7 @@ class ColloquiumScheduler:
                 if over_slots:
                     msg = "; ".join([f"s={s} (Cluster={c_cnt} > Räume={R}, Prüfungen={par})" for (s, c_cnt, par) in over_slots])
                     vprint(f"[MIP][Warn] Cluster-basierte Kapazität übersteigt Räume: {msg}")
-                    vprint("[MIP][Hinweis] Prüfe: zu aggressive Clustering-Regeln (tageweite Raumkonstanz), Permutations-Union, Rollen-Union.")
+                    vprint("[MIP][Hinweis] Prüfen Sie die Raumkonstanz der Ausschüsse und Themenblöcke.")
             except Exception:
                 pass
 
@@ -1377,6 +1470,9 @@ class ColloquiumScheduler:
                 pass
         elif status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             vprint(f"Raumvergabe für {DAYS[d]} (Woche {w}): Räume wurden passend verteilt.")
+            if status == cp_model.FEASIBLE:
+                self.feedback["room_notes"].append(f"{DAYS[d]}{w}: gültige Raumzuweisung gefunden; "
+                                                    "beste Raumqualität innerhalb der Rechenzeit nicht nachgewiesen.")
 
         assign: Dict[int, Optional[str]] = {}
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and not impossible:
@@ -1391,6 +1487,9 @@ class ColloquiumScheduler:
                 assign[c] = room_name
 
         elif status == cp_model.INFEASIBLE or impossible:
+            self.feedback["room_notes"].append(
+                f"{DAYS[d]}{w}: Raumkonstanz der Ausschuss-/Themencluster nicht erfüllbar; "
+                "ersatzweise einfache Raumzuweisung. Prüfen Sie Räume oder Ausschussbesetzung.")
             cluster_fixed_room = {}
             for s in local_slots:
                 used_rooms = set()
@@ -1414,15 +1513,13 @@ class ColloquiumScheduler:
                 r_idx = cluster_fixed_room.get(c, None)
                 assign[c] = self.params.rooms[r_idx] if r_idx is not None and r_idx < R else None
         else:
+            self.feedback["room_notes"].append(
+                f"{DAYS[d]}{w}: Raumvergabe mit Status {status_to_str(status)}, keine gültige Raumlösung. "
+                + ("Erhöhen Sie die Raum-Rechenzeit; Unlösbarkeit ist nicht nachgewiesen."
+                   if status == cp_model.UNKNOWN else "Prüfen Sie das Raummodell: " + model.Validate()))
             for c in range(K):
-                room_name = None
-                for r in range(R):
-                    if solver.BooleanValue(a[c][r]):
-                        room_name = self.params.rooms[r]
-                        break
-                if room_name is None:
-                    room_name = self.params.rooms[c % R] if R > 0 else None
-                assign[c] = room_name
+                # UNKNOWN/MODEL_INVALID haben keine auswertbaren Variablenwerte.
+                assign[c] = None
 
         exam_to_room: Dict[int, Optional[str]] = {}
         for (e, _) in day_exams:
@@ -1487,6 +1584,24 @@ class ColloquiumScheduler:
                     "SlotIndex": s, "Uhrzeit": pretty_time_for_slot(self.params, w, d, s),
                     "Raum": e_to_room.get(e.idx)
                 })
+        parked = [row for row in schedule if not row.get("Raum")]
+        if parked:
+            self.feedback["room_notes"].append(
+                f"{len(parked)} Prüfungen ohne Raum, im Parkplatz: "
+                + "; ".join(f"#{row['ExamIdx']} {row['Schueler']} ({row['Fach']})" for row in parked)
+                + ". Prüfen Sie die Raumzuweisung.")
+        # Tatsächlich erzielte Raumlücken nennen, nicht pauschal Kompaktheit behaupten.
+        room_slots = defaultdict(list)
+        for row in schedule:
+            if row.get("Raum"):
+                room_slots[(row["Woche"], row["Tag"], row["Raum"])].append(row["SlotIndex"])
+        for (week, day, room), slots in sorted(room_slots.items()):
+            gaps = max(slots) - min(slots) + 1 - len(set(slots))
+            if gaps:
+                self.feedback["room_notes"].append(f"Raum {room}, {day}{week}: {gaps} unbelegte Slots "
+                                                   "zwischen Prüfungen.")
+        if self.log_detailed_feedback and self.feedback["room_notes"]:
+            vprint(format_feedback(self.feedback))
         return schedule
 
 def prompt_yes_no(msg: str) -> bool:
@@ -1752,7 +1867,7 @@ def main():
             print(f"Hinweis: report.py konnte nicht automatisch gestartet werden: {e}")
         # -- END EXPORT SNIPPET --
     else:
-        print("Keine zulässige Slot-Lösung. Bitte Constraints prüfen/lockern.")
+        print("Kein gültiger Zeitplan. Prüfen Sie die genannten Engstellen und Bedingungen.")
 
 if __name__ == "__main__":
     main()

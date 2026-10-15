@@ -1,7 +1,8 @@
-Version = "0.1 (Build 11)"
+Version = "0.1 (Build 14)"
 
 import sys
 import json
+import math
 from functools import lru_cache
 from collections import defaultdict, OrderedDict
 from typing import List, Dict, Any, Tuple, Optional
@@ -18,7 +19,7 @@ try:
     from docx.shared import Pt, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
     from docx.enum.section import WD_ORIENTATION
-    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
@@ -50,9 +51,20 @@ BOTTOM_MARGIN = 1.0
 _FONT_METRICS_APP = None
 
 
+def _preparation_minutes(time_info=None, nta=0):
+    """NTA verlängert nur die Vorbereitung; der Puffer bleibt unabhängig davon.
+
+    Fehlende Einstellungen behalten die bisherigen Vorgaben 30 und 5 Minuten.
+    Die Rundung der NTA-Dauer auf ganze Minuten entspricht dem bisherigen Export.
+    """
+    info = time_info or {}
+    duration = int(round(int(info.get("prep_duration_min", 30)) * (1 + int(nta or 0) / 100)))
+    return duration, int(info.get("prep_buffer_min", 5))
+
+
 @lru_cache(maxsize=8192)
-def _slot_text_width_pt(text: str, size_pt: float) -> float:
-    """Misst die Breite eines Arial-Fettdruck-Runs in typografischen Punkten."""
+def _slot_text_width_pt(text: str, size_pt: float, bold: bool = True) -> float:
+    """Misst die Breite eines Arial-Runs in typografischen Punkten."""
     global _FONT_METRICS_APP
     from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication
 
@@ -63,7 +75,7 @@ def _slot_text_width_pt(text: str, size_pt: float) -> float:
 
     font = QFont(FONT_NAME)
     font.setPointSizeF(float(size_pt))
-    font.setBold(True)
+    font.setBold(bold)
     metrics = QFontMetricsF(font)
     screen = app.primaryScreen()
     dpi = screen.logicalDotsPerInchX() if screen else 96.0
@@ -335,6 +347,203 @@ def set_column_widths(table, widths_cm: List[float]):
             if i < len(widths_cm):
                 cell.width = Cm(widths_cm[i])
 
+def _scaled_word_widths(section, widths_cm, num_slots):
+    """Ab sechs Slots alle Spalten proportional auf die Nutzbreite begrenzen."""
+    if num_slots <= 5:
+        return widths_cm, 1.0
+    available = (section.page_width - section.left_margin - section.right_margin) / Cm(1)
+    scale = min(1.0, available / sum(widths_cm))
+    # Word speichert Breiten in Twips. Abrunden verhindert ein Überschreiten
+    # der Nutzbreite durch die Rundung mehrerer einzelner Spalten.
+    return [int(width * scale * 1440 / 2.54) * 2.54 / 1440 for width in widths_cm], scale
+
+def _format_dense_word_table(table, scale):
+    """Schrift proportional, mindestens 8 pt; Umbruch und wachsende Zeilen zulassen."""
+    seen = set()
+    for row in table.rows:
+        for height in row._tr.get_or_add_trPr().findall(qn('w:trHeight')):
+            height.set(qn('w:hRule'), 'atLeast')
+        for cell in row.cells:
+            if cell._tc in seen:
+                continue  # Zusammengeführte Kopfzellen nur einmal formatieren.
+            seen.add(cell._tc)
+            tc_pr = cell._tc.get_or_add_tcPr()
+            for nowrap in list(tc_pr.findall(qn('w:noWrap'))):
+                tc_pr.remove(nowrap)
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    size = run.font.size.pt if run.font.size is not None else FONT_SIZE_DEFAULT
+                    run.font.size = Pt(max(8, round(size * scale * 2) / 2))
+
+def _center_word_data_cells(table, room_column=None):
+    """Datenzellen mit symmetrischen Innenabständen; Raumkopf ohne Umbruch."""
+    for row in table.rows[1:]:
+        for cell in row.cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            tc_pr = cell._tc.get_or_add_tcPr()
+            margins = tc_pr.find(qn('w:tcMar'))
+            if margins is None:
+                margins = OxmlElement('w:tcMar')
+                tc_pr.append(margins)
+            for edge, value in (("left", 60), ("right", 60), ("top", 40), ("bottom", 40)):
+                element = margins.find(qn('w:' + edge))
+                if element is None:
+                    element = OxmlElement('w:' + edge)
+                    margins.append(element)
+                element.set(qn('w:w'), str(value))
+                element.set(qn('w:type'), 'dxa')
+            for paragraph in cell.paragraphs:
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                fmt = paragraph.paragraph_format
+                fmt.space_before = fmt.space_after = Pt(0)
+                fmt.left_indent = fmt.right_indent = fmt.first_line_indent = Pt(0)
+    if room_column is not None:
+        cell = table.rows[0].cells[room_column]
+        available = cell.width / 12700 - 12  # EMU je Punkt, 6 pt Innenabstand je Seite
+        for paragraph in cell.paragraphs:
+            for run in paragraph.runs:
+                size = run.font.size.pt if run.font.size is not None else FONT_SIZE_DEFAULT
+                while size > 8 and _slot_text_width_pt(run.text, size) > available:
+                    size = max(8, size - 0.5)
+                run.font.size = Pt(size)
+                if _slot_text_width_pt(run.text, size) > available:
+                    # Bei 8 pt die Buchstabenbreite begrenzen, nicht weiter verkleinern.
+                    fit = OxmlElement('w:fitText')
+                    fit.set(qn('w:val'), str(max(1, round(available * 20))))
+                    run._r.get_or_add_rPr().append(fit)
+        _set_cell_no_wrap(cell)
+
+def _fit_word_day_height(table, section, surrounding_paragraphs):
+    """Tageshöhe konservativ schätzen; ab 14 Datenzeilen kompakter, nie unter 8 pt.
+
+    Word bestimmt die endgültige Seiteneinteilung. Reicht das Höhenbudget selbst
+    bei 8 pt nicht, werden ganze Zeilen auf Folgeseiten mit wiederholtem Kopf erlaubt.
+    """
+    def text_lines(text, size, available, nowrap=False, bold=True):
+        count = 0
+        for line in text.split('\n'):
+            if nowrap or not line:
+                count += 1
+                continue
+            current = ''
+            for word in line.split():
+                candidate = (current + ' ' + word).strip()
+                if current and _slot_text_width_pt(candidate, size, bold) > available:
+                    count += 1
+                    current = ''
+                if _slot_text_width_pt(word, size, bold) > available:
+                    count += max(0, math.ceil(_slot_text_width_pt(word, size, bold) / available) - 1)
+                current = (current + ' ' + word).strip()
+            count += 1
+        return count
+
+    def paragraph_height(paragraph, available, nowrap=False, per_line=False):
+        visible_runs = [run for run in paragraph.runs if run.text.strip()]
+        size = max((run.font.size.pt if run.font.size else FONT_SIZE_DEFAULT
+                    for run in (visible_runs or paragraph.runs)), default=FONT_SIZE_DEFAULT)
+        fmt = paragraph.paragraph_format
+        def spacing(name):
+            value = getattr(fmt, 'space_' + name)
+            style = paragraph.style
+            while value is None and style is not None:
+                value = getattr(style.paragraph_format, 'space_' + name)
+                style = style.base_style
+            if value is not None:
+                return value.pt
+            defaults = paragraph.part.styles.element.xpath('w:docDefaults/w:pPrDefault/w:pPr/w:spacing')
+            return int(defaults[0].get(qn('w:' + name), '0')) / 20 if defaults else 0
+        line_height = fmt.line_spacing.pt if hasattr(fmt.line_spacing, 'pt') else size * 1.2
+        if per_line:
+            lines = [['', 0, False]]
+            for run in paragraph.runs:
+                for i, part in enumerate(run.text.split('\n')):
+                    if i:
+                        lines.append(['', 0, False])
+                    lines[-1][0] += part
+                    if part.strip():
+                        lines[-1][1] = max(lines[-1][1], run.font.size.pt if run.font.size else FONT_SIZE_DEFAULT)
+                        lines[-1][2] = lines[-1][2] or bool(run.bold)
+            height = sum(text_lines(text, line_size or size, max(1, available), nowrap, bold)
+                         * (line_size or size) * 1.2 for text, line_size, bold in lines)
+            return height + spacing('before') + spacing('after')
+        return text_lines(paragraph.text, size, max(1, available), nowrap) * line_height + spacing('before') + spacing('after')
+
+    def row_content_height(row):
+        heights = []
+        for cell in row.cells:
+            pr = cell._tc.get_or_add_tcPr()
+            margins = pr.find(qn('w:tcMar'))
+            def margin(edge, fallback):
+                element = margins.find(qn('w:' + edge)) if margins is not None else None
+                return int(element.get(qn('w:w'), fallback * 20)) / 20 if element is not None else fallback
+            width = cell.width / 12700 - margin('left', 6) - margin('right', 6)
+            heights.append(sum(paragraph_height(p, width, pr.find(qn('w:noWrap')) is not None,
+                                                per_line=row._tr is table.rows[0]._tr)
+                               for p in cell.paragraphs) + margin('top', 0) + margin('bottom', 0))
+        return max(heights, default=0)
+
+    # Nur Absätze nach dieser Tabelle behandeln, nicht die Tagesüberschriften.
+    footer_start = next((i for i, p in enumerate(surrounding_paragraphs)
+                         if p._p.getprevious() is table._tbl), len(surrounding_paragraphs))
+    footer = surrounding_paragraphs[footer_start:]
+    if footer and not footer[0].text.strip():
+        gap = footer[0]
+        gap.paragraph_format.space_before = gap.paragraph_format.space_after = Pt(0)
+        gap.paragraph_format.line_spacing = Pt(4)
+        if not gap.runs:
+            gap.add_run()
+        for run in gap.runs:
+            run.font.size = Pt(4)
+    has_note = bool(footer and footer[-1].text.strip())
+    if has_note:
+        for p in footer:
+            p.paragraph_format.keep_with_next = p is not footer[-1]
+        note = footer[-1]
+        note.paragraph_format.keep_together = True
+        note.paragraph_format.space_before = note.paragraph_format.space_after = Pt(0)
+    page_width = (section.page_width - section.left_margin - section.right_margin) / 12700
+    budget = ((section.page_height - section.top_margin - section.bottom_margin) / 12700
+              - sum(paragraph_height(p, page_width) for p in surrounding_paragraphs) - 24)
+    heights = []
+    runs = {}
+    for row in table.rows:
+        pr = row._tr.get_or_add_trPr()
+        height = pr.find(qn('w:trHeight'))
+        heights.append(int(height.get(qn('w:val'))) / 20 if height is not None else 0)
+        if pr.find(qn('w:cantSplit')) is None:
+            pr.append(OxmlElement('w:cantSplit'))
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                if row._tr is table.rows[0]._tr:
+                    paragraph.paragraph_format.space_before = paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.keep_with_next = has_note and row._tr is table.rows[-1]._tr
+                for run in paragraph.runs:
+                    runs[run._r] = (run, run.font.size.pt if run.font.size else FONT_SIZE_DEFAULT)
+    header_pr = table.rows[0]._tr.get_or_add_trPr()
+    if header_pr.find(qn('w:tblHeader')) is None:
+        header_pr.append(OxmlElement('w:tblHeader'))
+    # Word bestimmt die Kopfzeilenhöhe aus den tatsächlichen Textumbrüchen.
+    # Die Schätzung wird nur für das Tageshöhenbudget verwendet.
+    heights[0] = 0
+    for height in list(header_pr.findall(qn('w:trHeight'))):
+        header_pr.remove(height)
+    data_rows = len(table.rows) - 1
+    if data_rows <= 13 and sum(max(h, row_content_height(row))
+                              for h, row in zip(heights, table.rows)) <= budget:
+        return
+    scale = min(1.0, 13 / max(1, data_rows))
+    while True:
+        for run, size in runs.values():
+            run.font.size = Pt(max(8, round(size * scale * 2) / 2))
+        fitted = [max(h * scale, row_content_height(row) + (2 if i == 0 else 0))
+                  for i, (h, row) in enumerate(zip(heights, table.rows))]
+        if sum(fitted) <= budget or all(run.font.size.pt == 8 for run, _ in runs.values()):
+            break
+        scale = max(0, scale - 0.05)
+    for row, height in zip(table.rows[1:], fitted[1:]):
+        set_row_height(row, height * 2.54 / 72)
+        row._tr.trPr.find(qn('w:trHeight')).set(qn('w:hRule'), 'atLeast')
+
 def set_header_for_section(section, school_name_text: str, variant: Optional[str] = None):
         header = section.header
         # Header leeren (Absätze und Tabellen entfernen), um Dopplungen zu vermeiden
@@ -463,8 +672,8 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
     def fmt_hh_dot_mm(h: int, m: int) -> str:
         return f"{h:02d}.{m:02d}"
 
-    def minus_35_min(hh: int, mm: int):
-        t = hh * 60 + mm - 35
+    def preparation_start(hh: int, mm: int):
+        t = hh * 60 + mm - sum(_preparation_minutes(time_info))
         if t < 0:
             t = 0
         return ((t // 60) % 24, t % 60)
@@ -564,6 +773,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
 
         # Überschriften:
         # Zeile 1: "K o l l o q u i u m [aktuelles Jahr]" (Arial 24, fett, zentriert)
+        day_paragraph_start = len(doc.paragraphs)
         title1 = doc.add_paragraph()
         title1.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run1 = title1.add_run(f"K o l l o q u i u m {datetime.now().year}")
@@ -656,10 +866,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
                 name = short_student_name(r.get("Schueler") or "", collision_lastnames=collisions_global)
                 # Individuelle Vorbereitungszeit anzeigen, wenn NTA > 0.
                 # Modell:
-                # - Vorbereitung dauert 30 Minuten
-                # - Vorbereitung endet 5 Minuten vor Prüfungsbeginn
-                # - Bei NTA x% verlängert sich die Dauer auf 30*(1+x/100)
-                # - individueller Start = Slot-Beginn - (5 + Dauer)
+                # Konfigurierbare Dauer mit NTA, danach unveränderter Puffer.
                 nta_val = 0
                 try:
                     nta_val = int(r.get("NTA") or 0)
@@ -672,8 +879,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
                     b_tuple, _e = parse_begin_end(label) if label else (None, None)
                     if b_tuple:
                         b_h, b_m = b_tuple
-                        dur_min = int(round(30 * (1 + (nta_val / 100.0))))
-                        total_before = 5 + dur_min
+                        total_before = sum(_preparation_minutes(time_info, nta_val))
                         start_min = (b_h * 60 + b_m) - total_before
                         if start_min < 0:
                             start_min = start_min % (24 * 60)
@@ -711,6 +917,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
 
         # Spaltenbreiten gemäß Vorgabe:
         widths = [COL_W_KURS, COL_W_PRUEFER, COL_W_BEISITZER, COL_W_RAUM] + [COL_W_SLOT] * num_slots
+        widths, width_scale = _scaled_word_widths(doc.sections[-1], widths, num_slots)
         set_column_widths(table, widths)
 
         # Header-Zeile: Höhe erhöhen, damit 2 Zeilen (Zeit + Vorbereitung) sicher sichtbar sind
@@ -731,7 +938,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
         # Spalte 4: Raum
         set_cell_text(h1.cells[3], "Raum", bold=True)
 
-        # Slotspalten: Zeitlabels (mit Punkt-Format) + Vorbereitung (35 Min vorher)            
+        # Slotspalten: Zeitlabels und konfigurierbarer Vorbereitungsbeginn
         for si in range(num_slots):
             col = 4 + si
             label = day_slot_labels[si] if si < len(day_slot_labels) else ""
@@ -745,14 +952,14 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
                 label_dot = label
             # Zeile 1: Slot-Label fett
             set_cell_text(h1.cells[col], label_dot, bold=True)
-            # Zeile 2: Vorbereitung (35 Min vor Beginn), Arial 12 normal, zentriert
+            # Zeile 2: Vorbereitungsbeginn, Arial 12 normal, zentriert
             # Kein neuer Absatz – stattdessen Zeilenumbruch im selben Absatz
             cell = h1.cells[col]
             p = cell.paragraphs[0]  # vorhandenen Absatz (vom Slot-Label) weiterverwenden
             br = p.add_run()
             br.add_break(WD_BREAK.LINE)  # Zeilenumbruch innerhalb desselben Absatzes
             if b:
-                vh, vm = minus_35_min(b[0], b[1])
+                vh, vm = preparation_start(b[0], b[1])
                 prep_txt = f"Vorbereitung: {fmt_hh_dot_mm(vh, vm)}"
             else:
                 prep_txt = "Vorbereitung:"
@@ -784,7 +991,7 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
                 full = info["slots"][si] or ""
                 # Breitenbasierte Schriftgröße; lange zusammengesetzte Namen
                 # werden bei Bedarf gekürzt. Die NTA-Zeit wird mitgemessen.
-                base_text, nta_text, size_name, size_nta = _fit_slot_name(full)
+                base_text, nta_text, size_name, size_nta = _fit_slot_name(full, cell_width_cm=widths[-1])
 
                 # Zelle leeren und manuell formatierte Runs schreiben
                 cell.text = ""
@@ -817,6 +1024,9 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
 
             row_ptr += 1
 
+        if num_slots > 5:
+            _format_dense_word_table(table, width_scale)
+        _center_word_data_cells(table, room_column=3)
         # Abstand nach Tabelle
         doc.add_paragraph()
 
@@ -832,6 +1042,8 @@ def build_document(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
             prep_run.bold = True
             prep_run.font.name = FONT_NAME
             prep_run.font.size = Pt(16)
+
+        _fit_word_day_height(table, doc.sections[-1], doc.paragraphs[day_paragraph_start:])
 
     doc.save(out_path)
 
@@ -867,8 +1079,8 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
     def fmt_hh_dot_mm(h: int, m: int) -> str:
         return f"{h:02d}.{m:02d}"
 
-    def minus_35_min(hh: int, mm: int):
-        t = hh * 60 + mm - 35
+    def preparation_start(hh: int, mm: int):
+        t = hh * 60 + mm - sum(_preparation_minutes(time_info))
         if t < 0:
             t = 0
         return ((t // 60) % 24, t % 60)
@@ -1039,6 +1251,7 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
         num_slots = len(day_slot_labels)
 
         # Titelzeilen (wie build_document)
+        day_paragraph_start = len(doc.paragraphs)
         title1 = doc.add_paragraph()
         title1.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run1 = title1.add_run(f"K o l l o q u i u m {datetime.now().year}")
@@ -1127,8 +1340,7 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
                     b_tuple, _e = parse_begin_end(label) if label else (None, None)
                     if b_tuple:
                         b_h, b_m = b_tuple
-                        dur_min = int(round(30 * (1 + (nta_val / 100.0))))
-                        total_before = 5 + dur_min
+                        total_before = sum(_preparation_minutes(time_info, nta_val))
                         start_min = (b_h * 60 + b_m) - total_before
                         if start_min < 0:
                             start_min = start_min % (24 * 60)
@@ -1164,6 +1376,7 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
 
         # Spaltenbreiten: Kurs, Prüfer, Beisitzer, Slots...
         widths = [COL_W_KURS, COL_W_PRUEFER, COL_W_BEISITZER] + [COL_W_SLOT] * num_slots
+        widths, width_scale = _scaled_word_widths(doc.sections[-1], widths, num_slots)
         set_column_widths(table, widths)
 
         # Header-Zeile höher (wie build_document)
@@ -1196,7 +1409,7 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Vorbereitung zuerst (fett)
             if b:
-                vh, vm = minus_35_min(b[0], b[1])
+                vh, vm = preparation_start(b[0], b[1])
                 prep_txt = f"Vorbereitung: {fmt_hh_dot_mm(vh, vm)}"
             else:
                 prep_txt = "Vorbereitung:"
@@ -1227,7 +1440,7 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
             for si in range(num_slots):
                 cell = row.cells[3 + si]
                 full = info["slots"][si] or ""
-                base_text, nta_text, size_name, size_nta = _fit_slot_name(full)
+                base_text, nta_text, size_name, size_nta = _fit_slot_name(full, cell_width_cm=widths[-1])
                 cell.text = ""
                 _set_cell_no_wrap(cell)
                 p = cell.paragraphs[0]
@@ -1250,6 +1463,9 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
                     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             row_ptr += 1
 
+        if num_slots > 5:
+            _format_dense_word_table(table, width_scale)
+        _center_word_data_cells(table)
         # Abstand nach Tabelle
         doc.add_paragraph()
 
@@ -1262,6 +1478,8 @@ def build_document_students(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
             prep_run.bold = True
             prep_run.font.name = FONT_NAME
             prep_run.font.size = Pt(16)
+
+        _fit_word_day_height(table, doc.sections[-1], doc.paragraphs[day_paragraph_start:])
 
     doc.save(out_path)
     
@@ -1458,6 +1676,7 @@ def build_document_cleaning(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
         num_slots = len(day_slot_labels)
 
         # Titelzeilen (wie build_document)
+        day_paragraph_start = len(doc.paragraphs)
         title1 = doc.add_paragraph()
         title1.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run1 = title1.add_run(f"K o l l o q u i u m {datetime.now().year}")
@@ -1566,6 +1785,7 @@ def build_document_cleaning(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
 
         # Spaltenbreiten: Raum, Slots...
         widths = [COL_W_RAUM] + [COL_W_SLOT] * num_slots
+        widths, width_scale = _scaled_word_widths(doc.sections[-1], widths, num_slots)
         set_column_widths(table, widths)
 
         # Header-Zeile
@@ -1627,6 +1847,9 @@ def build_document_cleaning(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
                     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             row_ptr += 1
 
+        if num_slots > 5:
+            _format_dense_word_table(table, width_scale)
+        _center_word_data_cells(table, room_column=0)
         # Abstand nach Tabelle
         doc.add_paragraph()
 
@@ -1643,6 +1866,8 @@ def build_document_cleaning(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]]
             prep_run.font.name = FONT_NAME
             prep_run.font.size = Pt(16)
 
+        _fit_word_day_height(table, doc.sections[-1], doc.paragraphs[day_paragraph_start:])
+
     doc.save(out_path)
 
 def build_xlsx(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
@@ -1653,8 +1878,8 @@ def build_xlsx(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
     Erzeugt eine Excel-Tabelle mit folgender Struktur:
     A ID | B Schüler | C Kurs | D Thema | E Prüfer | F Beisitzer | G Tag | H-J Vorbereitung | K-M Prüfung | N-P Absperrung
     - H = Vorbereitungsraum (aus time_info['prepare_room'])
-    - I = Beginn Vorbereitung = Prüfungsbeginn - (30*(1+NTA/100)) - 5 Min
-    - J = Ende Vorbereitung = 5 Min vor Prüfungsbeginn
+    - I = Beginn Vorbereitung = Prüfungsbeginn - NTA-Vorbereitungsdauer - Puffer
+    - J = Ende Vorbereitung = Prüfungsbeginn - Puffer
     - K = Prüfungsraum
     - L = Prüfungsbeginn
     - M = Prüfungsende = Prüfungsbeginn + slot_len_min
@@ -1807,8 +2032,8 @@ def build_xlsx(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
     if options.get("Vorbereitung", True):
         cols.extend([
             ("Vorbereitung", "Vorbereitung", "Raum",   lambda r, wsi: prepare_room or "", "Vorbereitung_Raum"),
-            ("Vorbereitung", None,           "Beginn", lambda r, wsi: (wsi[0] - timedelta(minutes=5 + int(round(30 * (1 + (int(r.get('NTA') or 0) / 100.0)))))).strftime("%H:%M") if wsi[0] else "", "Vorbereitung_Beginn"),
-            ("Vorbereitung", None,           "Ende",   lambda r, wsi: (wsi[0] - timedelta(minutes=5)).strftime("%H:%M") if wsi[0] else "", "Vorbereitung_Ende"),
+            ("Vorbereitung", None,           "Beginn", lambda r, wsi: (wsi[0] - timedelta(minutes=sum(_preparation_minutes(time_info, r.get('NTA'))))).strftime("%H:%M") if wsi[0] else "", "Vorbereitung_Beginn"),
+            ("Vorbereitung", None,           "Ende",   lambda r, wsi: (wsi[0] - timedelta(minutes=_preparation_minutes(time_info)[1])).strftime("%H:%M") if wsi[0] else "", "Vorbereitung_Ende"),
         ])
     if options.get("Prüfung", True):
         cols.extend([
@@ -1943,14 +2168,15 @@ def build_xlsx(grouped: Dict[Tuple[int, str], List[Dict[str, Any]]],
             # letzter Schueler des Clusters
             last = cl[-1]
             last_start_dt, _last_end_dt = slot_start_end_for(last)
-            # Vorbereitung des letzten: Ende = 5 Min vor Pruefungsbeginn; Beginn = Ende - (30*(1+NTA/100))
+            # Vorbereitung des letzten: NTA-Dauer und unabhängigen Puffer berücksichtigen.
             last_nta = 0
             try:
                 last_nta = int(last.get("NTA") or 0)
             except Exception:
                 last_nta = 0
-            last_prep_end = (last_start_dt - timedelta(minutes=5)) if last_start_dt else None
-            last_prep_begin = (last_prep_end - timedelta(minutes=int(round(30*(1+(last_nta/100.0)))))) if last_prep_end else None
+            last_duration, last_buffer = _preparation_minutes(time_info, last_nta)
+            last_prep_end = (last_start_dt - timedelta(minutes=last_buffer)) if last_start_dt else None
+            last_prep_begin = (last_prep_end - timedelta(minutes=last_duration)) if last_prep_end else None
             # fuer die ersten k Schueler laut Staffelung Absperrung eintragen
             k = 1 if len(cl) == 3 else (2 if len(cl) == 4 else 3)  # 3->1, 4->2, 5->3
             for idx_in_seq, exam_row in enumerate(cl):

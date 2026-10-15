@@ -1,4 +1,4 @@
-Version = "1.2.9 (Build 46)"
+Version = "1.2.10 (Build 56)"
 
 import sys
 import os
@@ -38,6 +38,26 @@ import report as REP     # Statistik-Report
 DAYS = ["Mo", "Di", "Mi", "Do", "Fr"]
 DAY_INDEX = {d: i for i, d in enumerate(DAYS)}
 WEEKS = [1, 2]
+
+
+def grouping_exam_chunks(exams: List["Exam"], block_size: Optional[int]) -> List[List["Exam"]]:
+    """Build the same sorted grouping chunks as kolloPlaner.ColloquiumScheduler."""
+    if block_size not in (2, 3, 4, 5):
+        return []
+    groups: Dict[Tuple[str, str, str], List["Exam"]] = {}
+    for exam in exams:
+        key = (exam.Thema, exam.Fach, exam.Pruefer)
+        groups.setdefault(key, []).append(exam)
+    chunks: List[List["Exam"]] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        ordered = sorted(group, key=lambda exam: exam.Schueler)
+        for start in range(0, len(ordered), block_size):
+            chunk = ordered[start:start + block_size]
+            if len(chunk) > 1:
+                chunks.append(chunk)
+    return chunks
 
 # Farben (inkl. erlaubte Ziele)
 COLOR_HARD_FORBIDDEN = QColor(255, 200, 200)  # hellrot
@@ -242,6 +262,8 @@ class TimeSettings:
     break_len_min: int = 30
     week1_date: Optional[str] = "2026-05-18"  # "YYYY-MM-DD"
     week2_date: Optional[str] = "2026-06-08"
+    prep_duration_min: int = 30
+    prep_buffer_min: int = 5
 
 @dataclass
 class ConstraintsSettings:
@@ -635,6 +657,7 @@ class DataController(QObject):
         if not hasattr(self.settings, "students_note_text"):
             self.settings.students_note_text = ""
         self.schedule: List[ScheduleItem] = []
+        self.solver_feedback: Dict[str, Any] = {}
         self.teachers: List[Teacher] = []
         # Getrennte Quellen erlauben Einzelimporte, ohne Werte anderer CSVs zu verlieren.
         self.teacher_roster_source: Dict[str, str] = {}
@@ -1233,6 +1256,8 @@ class DataController(QObject):
             "n_slots": t.n_slots,
             "start_time": t.start_time,
             "slot_len_min": t.slot_len_min,
+            "prep_duration_min": t.prep_duration_min,
+            "prep_buffer_min": t.prep_buffer_min,
             "break_len_min": t.break_len_min,
             "week1_date": t.week1_date,
             "week2_date": t.week2_date,
@@ -1268,6 +1293,8 @@ class DataController(QObject):
         t = self.settings.time
         time_info = {
             "slot_len_min": t.slot_len_min,
+            "prep_duration_min": t.prep_duration_min,
+            "prep_buffer_min": t.prep_buffer_min,
             "week1_date": t.week1_date,
             "week2_date": t.week2_date,
             "prepare_room": self.settings.prepare_room or "",
@@ -1301,6 +1328,8 @@ class DataController(QObject):
         t = self.settings.time
         time_info = {
             "slot_len_min": t.slot_len_min,
+            "prep_duration_min": t.prep_duration_min,
+            "prep_buffer_min": t.prep_buffer_min,
             "week1_date": t.week1_date,
             "week2_date": t.week2_date,
             "prepare_room": self.settings.prepare_room or "",
@@ -1336,6 +1365,8 @@ class DataController(QObject):
         t = self.settings.time
         time_info = {
             "slot_len_min": t.slot_len_min,
+            "prep_duration_min": t.prep_duration_min,
+            "prep_buffer_min": t.prep_buffer_min,
             "week1_date": t.week1_date,
             "week2_date": t.week2_date,
             "prepare_room": self.settings.prepare_room or "",
@@ -1415,6 +1446,7 @@ class DataController(QObject):
 
     # Solver – Hintergrundlauf (threaded)
     def run_solver_background(self):
+        self.solver_feedback = {}
         def log_cb(msg: str):
             self.log(msg)  # Signal zur GUI
 
@@ -1471,11 +1503,13 @@ class DataController(QObject):
         K.LOG_CALLBACK = log_cb
         try:
             scheduler = K.ColloquiumScheduler(k_exams, params, cfg, una, no_exam_days)
+            scheduler.log_detailed_feedback = False
             scheduler.add_basic_constraints()
             scheduler.add_hard_constraints()
             scheduler.add_soft_constraints()
             solver, status = scheduler.solve(time_limit_sec=int(c.cp_time_limit_sec))
             schedule_rows = scheduler.extract_schedule(solver) if status in (K.cp_model.OPTIMAL, K.cp_model.FEASIBLE) else []
+            self.solver_feedback = scheduler.feedback
         finally:
             K.LOG_CALLBACK = old_cb
             K.VERBOSE = old_verbose
@@ -1729,96 +1763,47 @@ class DataController(QObject):
         self.conflict_map = cmap
         # kein automatisches dataChanged hier; der Aufrufer triggert Refresh
 
-        # --- Zusätzliche harte Prüfung: Kopplungsblöcke (Gruppierung) ---
-        # Wenn aktiv, markiere alle Items eines (Thema,Fach,Pruefer)-Clusters hart,
-        # die nicht gemeinsam im gleichen (Woche, Tag)-Paar liegen UND nicht als konsekutive Slots im selben Raum liegen.
+        # --- Harte Prüfung der Kopplungsblöcke ---
+        # Entspricht der Solver-Reihenfolge: nach Schüler sortieren, dann anhand
+        # der eingestellten Blockgröße in unabhängig zu planende Teilblöcke teilen.
         c = self.settings.constraints
         if getattr(c, "hard_grouping_enabled", False):
-            # Cluster bilden: key = (Thema, Fach, Prüfer)
-            clusters: Dict[Tuple[str, str, str], List[ScheduleItem]] = {}
-            # Nur geplante Items (Raum != "" und Woche/Tag/Slot gesetzt) betrachten
-            planned_items = [
-                it for it in self.schedule
-                if (it.Raum is not None and it.Raum != "" and it.Woche is not None and it.Tag is not None and it.SlotIndex is not None)
-            ]
-            # Mapping idx -> Exam zur Attributabfrage
-            exam_by_idx: Dict[int, Exam] = {e.idx: e for e in self.exams}
-            for it in planned_items:
-                ex = exam_by_idx.get(it.ExamIdx)
-                if not ex:
-                    continue
-                # Nur vollständige Schlüssel zulassen
-                thema = (ex.Thema or "").strip()
-                fach = (ex.Fach or "").strip()
-                pruefer = (ex.Pruefer or "").strip()
-                if thema == "" or fach == "" or pruefer == "":
-                    continue
-                key = (thema, fach, pruefer)
-                clusters.setdefault(key, []).append(it)
+            planned_by_id = {
+                it.ExamIdx: it for it in self.schedule
+                if it.Raum not in (None, "") and it.Woche is not None
+                and it.Tag is not None and it.SlotIndex is not None
+            }
 
-            # Für jedes Cluster prüfen, ob alle Items am selben (Woche, Tag) liegen
-            for key, items in clusters.items():
-                if len(items) <= 1:
-                    continue  # kein Kopplungsbedarf
-                day_pairs: Set[Tuple[int, str]] = set()
-                for it in items:
-                    try:
-                        day_pairs.add((int(it.Woche), str(it.Tag)))
-                    except Exception:
-                        pass
-                if len(day_pairs) > 1:
-                    # Verletzung: markiere alle Items des Clusters hart
-                    for it in items:
-                        def mark_local(idx: int, level: str, msg: str):
-                            cur = cmap.get(idx, (None, []))
-                            cur_level, msgs = cur
-                            if cur_level is None or (cur_level == "soft" and level == "hard"):
-                                cur_level = level
-                            msgs = msgs + [msg]
-                            cmap[idx] = (cur_level, msgs)
-                        mark_local(it.ExamIdx, "hard", "Kopplungsblock verletzt (Gruppierung)")
-                    continue  # weitere Adjazenzprüfung entfällt, da bereits Tages-Trennung
-                # Zusätzliche harte Bedingung: konsektutive Slots im selben Raum (pausenlos, raumgebunden)
-                # Gruppiere Items (am gemeinsamen Tag) nach Raum und sammle Slots
-                try:
-                    # Tag/Woche sind identisch, daher nimm das (Woche,Tag)-Paar aus einem Item
-                    w, d = next(iter(day_pairs))
-                    room_slots: Dict[str, List[int]] = {}
-                    for it in items:
-                        if int(it.Woche) == int(w) and str(it.Tag) == str(d):
-                            if it.Raum and it.SlotIndex is not None:
-                                room_slots.setdefault(str(it.Raum), []).append(int(it.SlotIndex))
-                    total = sum(len(v) for v in room_slots.values())
-                    if total >= 2:
-                        non_empty_rooms = [r for r, lst in room_slots.items() if len(lst) > 0]
-                        if len(non_empty_rooms) != 1:
-                            # Slots über mehrere Räume verteilt -> Verletzung
-                            for it in items:
-                                def mark_local(idx: int, level: str, msg: str):
-                                    cur = cmap.get(idx, (None, []))
-                                    cur_level, msgs = cur
-                                    if cur_level is None or (cur_level == "soft" and level == "hard"):
-                                        cur_level = level
-                                    msgs = msgs + [msg]
-                                    cmap[idx] = (cur_level, msgs)
-                                mark_local(it.ExamIdx, "hard", "Kopplungsblock verletzt (nicht konsekutive Slots im selben Raum)")
-                        else:
-                            room = non_empty_rooms[0]
-                            seq = sorted(set(room_slots.get(room, [])))
-                            # Lückenlose Sequenz prüfen: keine Pausen/gaps und alle Elemente im selben Raum
-                            if len(seq) < total or any(seq[i] + 1 != seq[i+1] for i in range(len(seq)-1)):
-                                for it in items:
-                                    def mark_local(idx: int, level: str, msg: str):
-                                        cur = cmap.get(idx, (None, []))
-                                        cur_level, msgs = cur
-                                        if cur_level is None or (cur_level == "soft" and level == "hard"):
-                                            cur_level = level
-                                        msgs = msgs + [msg]
-                                        cmap[idx] = (cur_level, msgs)
-                                    mark_local(it.ExamIdx, "hard", "Kopplungsblock verletzt (nicht konsekutive Slots im selben Raum)")
-                except Exception:
-                    # Bei Inkonsistenzen (fehlende Daten) hier keine zusätzliche Markierung
-                    pass
+            def mark_group_chunk(items: List[ScheduleItem], message: str) -> None:
+                for item in items:
+                    current_level, messages = cmap.get(item.ExamIdx, (None, []))
+                    if current_level is None or current_level == "soft":
+                        current_level = "hard"
+                    cmap[item.ExamIdx] = (current_level, messages + [message])
+
+            for exam_chunk in grouping_exam_chunks(self.exams, c.grouping_block_size):
+                # Teilweise geparkte oder unvollständige Blöcke werden hier nicht
+                # bewertet; die Live-Prüfung betrachtet wie bisher nur geplante Items.
+                items = [planned_by_id.get(exam.idx) for exam in exam_chunk]
+                if any(item is None for item in items):
+                    continue
+                chunk_items = [item for item in items if item is not None]
+                day_pairs = {(int(item.Woche), str(item.Tag)) for item in chunk_items}
+                if len(day_pairs) != 1:
+                    mark_group_chunk(chunk_items, "Kopplungsblock verletzt (Gruppierung)")
+                    continue
+
+                rooms = {str(item.Raum) for item in chunk_items}
+                slots = sorted(int(item.SlotIndex) for item in chunk_items)
+                if (
+                    len(rooms) != 1
+                    or len(set(slots)) != len(chunk_items)
+                    or any(slots[i] + 1 != slots[i + 1] for i in range(len(slots) - 1))
+                ):
+                    mark_group_chunk(
+                        chunk_items,
+                        "Kopplungsblock verletzt (nicht konsekutive Slots im selben Raum)",
+                    )
 
     def evaluate_fair_day_distribution(self):
         """
@@ -2331,56 +2316,39 @@ class RightModel(QAbstractTableModel):
                     if abs(ord_to - od) < req:
                         return False, "Mindestabstand Schüler verletzt", []
 
-        # Harte Regel: Kopplungsblöcke (Gruppierung gleicher (Thema, Fach, Prüfer)) müssen am selben (Woche, Tag) liegen
-        if getattr(c, "hard_grouping_enabled", False):
-            thema = (ex.Thema or "").strip()
-            fach = (ex.Fach or "").strip()
-            pruefer = (ex.Pruefer or "").strip()
-            if thema != "" and fach != "" and pruefer != "":
-                # Sammle geplante Items im Cluster und prüfe (Woche, Tag)
-                cluster_day_pairs: Set[Tuple[int, str]] = set()
-                # Für die Adjazenzprüfung zusätzlich: (Raum, SlotIndex) am Ziel-Tag/Woche
-                same_day_room_slots: Dict[str, List[int]] = {}
-                target_pair = (to_w, DAYS[to_d])
-                for it in self.dc.schedule:
-                    o = self._exam_by_idx(it.ExamIdx)
-                    if not o:
-                        continue
-                    if (o.Thema or "").strip() == thema and (o.Fach or "").strip() == fach and (o.Pruefer or "").strip() == pruefer:
-                        if it.ExamIdx == exam_idx:
-                            # der verschobene Block zählt mit dem Ziel-Tag
-                            cluster_day_pairs.add(target_pair)
-                            # Für die Adjazenz-/Raumprüfung berücksichtigen wir den Ziel-Slot/-Raum
-                            if to_w is not None and to_d is not None and to_s is not None and to_room:
-                                key_w, key_d = to_w, DAYS[to_d]
-                                if key_w == target_pair[0] and key_d == target_pair[1]:
-                                    same_day_room_slots.setdefault(to_room, []).append(int(to_s))
-                        else:
-                            if it.Woche is not None and it.Tag is not None:
-                                cluster_day_pairs.add((int(it.Woche), str(it.Tag)))
-                            # Sammle Slots pro Raum nur für den Ziel-(Woche,Tag)
-                            try:
-                                if it.Woche is not None and it.Tag is not None and int(it.Woche) == target_pair[0] and str(it.Tag) == target_pair[1]:
-                                    if it.Raum and it.SlotIndex is not None:
-                                        same_day_room_slots.setdefault(str(it.Raum), []).append(int(it.SlotIndex))
-                            except Exception:
-                                pass
-                # Wenn mehr als ein (Woche, Tag)-Paar vorkommt, wäre die Kopplung verletzt
-                if len(cluster_day_pairs) > 1:
-                    return False, "Kopplungsblock verletzt (Gruppierung)", []
-                # Zusätzliche harte Bedingung: konsektutive Slots im selben Raum (pausenlos, raumgebunden)
-                # Gilt nur, wenn mindestens zwei Items am selben (Woche,Tag) existieren
-                total_same_day = sum(len(v) for v in same_day_room_slots.values())
-                if total_same_day >= 2:
-                    # Es darf genau EIN Raum den gesamten Block enthalten; in diesem Raum müssen die Slots eine lückenlose Sequenz bilden
-                    # Falls die Slots auf mehrere Räume verteilt sind, Verletzung
-                    non_empty_rooms = [r for r, lst in same_day_room_slots.items() if len(lst) > 0]
-                    if len(non_empty_rooms) != 1:
+        # Kopplungsprüfung mit denselben sortierten Teilblöcken wie im Solver.
+        if getattr(c, "hard_grouping_enabled", False) and to_room:
+            target_chunk = next(
+                (chunk for chunk in grouping_exam_chunks(self.dc.exams, c.grouping_block_size)
+                 if any(member.idx == exam_idx for member in chunk)),
+                [],
+            )
+            if len(target_chunk) > 1:
+                chunk_ids = {member.idx for member in target_chunk}
+                chunk_positions = [(int(to_w), DAYS[to_d], int(to_s), str(to_room))]
+                for item in self.dc.schedule:
+                    if (
+                        item.ExamIdx in chunk_ids
+                        and item.ExamIdx != exam_idx
+                        and item.Raum not in (None, "")
+                        and item.Woche is not None
+                        and item.Tag is not None
+                        and item.SlotIndex is not None
+                    ):
+                        chunk_positions.append((
+                            int(item.Woche), str(item.Tag), int(item.SlotIndex), str(item.Raum)
+                        ))
+
+                if len(chunk_positions) > 1:
+                    day_pairs = {(week, day) for week, day, _, _ in chunk_positions}
+                    rooms = {room for _, _, _, room in chunk_positions}
+                    slots = sorted(slot for _, _, slot, _ in chunk_positions)
+                    if len(day_pairs) > 1 or len(rooms) != 1:
                         return False, "Kopplungsblock verletzt (Gruppierung)", []
-                    room = non_empty_rooms[0]
-                    seq = sorted(set(same_day_room_slots.get(room, [])))
-                    # Lückenlose Sequenz prüfen
-                    if len(seq) < total_same_day or any(seq[i] + 1 != seq[i+1] for i in range(len(seq)-1)):
+                    if (
+                        len(set(slots)) != len(chunk_positions)
+                        or any(slots[i] + 1 != slots[i + 1] for i in range(len(slots) - 1))
+                    ):
                         return False, "Kopplungsblock verletzt (Gruppierung)", []
 
         # Harte K-Regel: max Tage pro Person (rollenübergreifend, alle Wochen)
@@ -2615,7 +2583,7 @@ class ParkingModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return ""  # Einspaltig, kein Header-Text notwendig
+            return "Ablage"
         return None
 
     def index_to_item(self, row: int, col: int) -> Optional[int]:
@@ -3003,8 +2971,6 @@ class MainWindow(QMainWindow):
         self.parkingView.setItemDelegate(ParkingDelegate(self.dc, self.parkingView))
         # Fixe Breite VOR dem Hinzufügen zum Splitter setzen
         self.parkingView.setFixedWidth(160)
-        self.parkingView.setMinimumWidth(160)
-        self.parkingView.setMaximumWidth(160)
         self.parkingView.setSelectionBehavior(QTableView.SelectItems)
         self.parkingView.setSelectionMode(QTableView.SingleSelection)
         self.parkingView.setDragEnabled(True)
@@ -3016,7 +2982,7 @@ class MainWindow(QMainWindow):
         self.parkingView.verticalHeader().setDefaultSectionSize(BLOCK_HEIGHT_MAX)
         self.parkingView.verticalHeader().setMinimumSectionSize(BLOCK_HEIGHT_MIN)
         
-        self.parkingView.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.parkingView.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.parkingView.setFont(FONT_DEFAULT)
         self.parkingView.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # Kontextmen fr Parkplatz
@@ -3027,8 +2993,6 @@ class MainWindow(QMainWindow):
         for i in range(1):
             self.parkingView.setColumnWidth(i, 160)
         # Fixe Breite für die gesamte Parkplatz-View (nicht veränderbar)
-        self.parkingView.setMinimumWidth(160)
-        self.parkingView.setMaximumWidth(160)
         self.parkingView.setFixedWidth(160)
         # Optional: horizontales Scrollen deaktivieren (eine Spalte, feste Breite)
         self.parkingView.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -3037,7 +3001,32 @@ class MainWindow(QMainWindow):
         
         splitter.addWidget(self.leftView)
         splitter.addWidget(self.rightView)
-        splitter.addWidget(self.parkingView)
+        self.workloadView = QTableView()
+        self.workloadModel = QStandardItemModel(0, 2, self)
+        self.workloadModel.setHorizontalHeaderLabels(["Lehrkraft", "Belastung"])
+        # Gleiche Sortierrolle, aber Kürzel als Text und Belastung als Zahl.
+        self.workloadModel.setSortRole(Qt.UserRole)
+        self.workloadView.setModel(self.workloadModel)
+        self.workloadView.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.workloadView.verticalHeader().setVisible(False)
+        self.workloadView.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.workloadView.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.workloadView.setSortingEnabled(True)
+        self.workloadView.sortByColumn(0, Qt.AscendingOrder)
+        self.workloadView.horizontalHeader().sectionResized.connect(
+            lambda *_: QTimer.singleShot(0, self._fit_workload_header))
+        self.workloadView.horizontalHeader().sortIndicatorChanged.connect(
+            lambda *_: QTimer.singleShot(0, self._fit_workload_header))
+        QTimer.singleShot(0, self._fit_workload_header)
+        self.sidebar = QSplitter(Qt.Vertical)
+        self.sidebar.setFixedWidth(160)
+        self.sidebar.addWidget(self.parkingView)
+        self.sidebar.addWidget(self.workloadView)
+        self.sidebar.setStretchFactor(0, 3)
+        self.sidebar.setStretchFactor(1, 2)
+        self.sidebar.setSizes([600, 400])
+        self._refresh_workload_table()
+        splitter.addWidget(self.sidebar)
         # Splitter-Stretch: linke und mittlere Ansicht dehnbar, Parkplatz fest
         splitter.setStretchFactor(0, 0)  # left fixed width (von setFixedWidth auf leftView nicht gesetzt, aber meist klein)
         splitter.setStretchFactor(1, 1)  # right (Plan) dehnbar
@@ -3067,9 +3056,53 @@ class MainWindow(QMainWindow):
         self.rightView.viewport().installEventFilter(self)
         self.examsDialog: Optional[ExamsDialog] = None
 
+    def _fit_workload_header(self):
+        """Beide Überschriften mit derselben passenden Schriftgröße anzeigen."""
+        header = self.workloadView.horizontalHeader()
+        style = header.style()
+        padding = 2 * style.pixelMetric(style.PixelMetric.PM_HeaderMargin)
+        arrow = style.pixelMetric(style.PixelMetric.PM_HeaderMarkSize)
+        titles = ("Lehrkraft", "Belastung")
+        font = QFont(header.font())
+        while any(QFontMetricsF(font).horizontalAdvance(title)
+                  > max(1, header.sectionSize(column) - padding - arrow - 4)
+                  for column, title in enumerate(titles)):
+            if font.pointSizeF() > 1:
+                font.setPointSizeF(max(1, font.pointSizeF() - 0.5))
+            elif font.pixelSize() > 1:
+                font.setPixelSize(font.pixelSize() - 1)
+            else:
+                break
+        for column in range(len(titles)):
+            if self.workloadModel.headerData(column, Qt.Horizontal, Qt.FontRole) != font:
+                self.workloadModel.setHeaderData(column, Qt.Horizontal, font, Qt.FontRole)
+
+    def _refresh_workload_table(self):
+        """Alle Lehrkräfte anzeigen; bestehende Sortierung und Belastungsfarben erhalten."""
+        self.workloadView.setSortingEnabled(False)
+        self.workloadModel.setRowCount(0)
+        for teacher in self.dc.teachers:
+            name = QStandardItem(teacher.Lehrkraft or "")
+            name.setData(teacher.Lehrkraft or "", Qt.UserRole)
+            burden = QStandardItem(teacher.Belastung or "")
+            try:
+                value = float((teacher.Belastung or "0").replace(",", "."))
+            except ValueError:
+                value = 0.0
+            burden.setData(value, Qt.UserRole)
+            burden.setTextAlignment(Qt.AlignCenter)
+            if value > 0:
+                burden.setBackground(QColor(255, 200, 200))
+            elif value < 0:
+                burden.setBackground(QColor(220, 255, 220))
+            name.setEditable(False)
+            burden.setEditable(False)
+            self.workloadModel.appendRow([name, burden])
+        self.workloadView.setSortingEnabled(True)
+
     def _init_splitter_sizes(self):
         """
-        Setzt initiale Splittergrößen so, dass die parkingView exakt 160 px erhält
+        Setzt initiale Splittergrößen so, dass die Seitenleiste exakt 160 px erhält
         und kein grauer Bereich entsteht. Danach ein force-Layout.
         """
         try:
@@ -3757,18 +3790,67 @@ class MainWindow(QMainWindow):
                 self.dc.mark_dirty_and_emit()
             
     def on_time(self):
+        if self._solver_is_running():
+            QMessageBox.information(self, "Solver läuft",
+                                    "Bitte warten Sie auf den Abschluss des Solverlaufs, bevor Sie die Zeitstruktur ändern.")
+            return
         dlg = TimeDialog(self, self.dc.settings.time)
         if dlg.exec() == QDialog.Accepted:
+            if self._solver_is_running():
+                QMessageBox.information(self, "Solver läuft",
+                                        "Die Zeitstruktur kann während eines Solverlaufs nicht übernommen werden.")
+                return
             old_time = self.dc.settings.time
             new_time = dlg.apply()
+            try:
+                week1 = datetime.strptime(new_time.week1_date or "", "%Y-%m-%d").date()
+                week2 = datetime.strptime(new_time.week2_date or "", "%Y-%m-%d").date()
+                if week1.weekday() != 0 or week2.weekday() != 0:
+                    raise ValueError("Bitte wählen Sie für beide Prüfungswochen einen Montag als Startdatum.")
+                if week2 <= week1:
+                    raise ValueError("Das Startdatum der zweiten Prüfungswoche muss nach dem der ersten liegen.")
+                start = datetime.strptime(new_time.start_time, "%H:%M")
+                if new_time.n_slots > 0:
+                    last_end = (start.hour * 60 + start.minute
+                                + (new_time.n_slots - 1) * (new_time.slot_len_min + new_time.break_len_min)
+                                + new_time.slot_len_min)
+                    if last_end >= 24 * 60:
+                        raise ValueError("Der letzte Slot muss vor Mitternacht enden. "
+                                         "Bitte prüfen Sie Startzeit, Slotzahl, Slotlänge und Pause.")
+            except ValueError as error:
+                QMessageBox.warning(self, "Ungültige Zeitstruktur", str(error)
+                                    + "\n\nDie bisherigen Einstellungen bleiben erhalten.")
+                return
+            if new_time.n_slots < old_time.n_slots:
+                occupied = sorted({
+                    f"{it.Tag}{it.Woche}: Slot {it.SlotIndex + 1}, Raum {it.Raum}"
+                    for it in self.dc.schedule
+                    if (it.Raum or "").strip() and it.Woche is not None
+                    and it.Tag is not None and it.SlotIndex is not None
+                    and it.SlotIndex >= new_time.n_slots
+                })
+                if occupied:
+                    QMessageBox.warning(
+                        self, "Slotzahl kann nicht verringert werden",
+                        "Die folgenden Slots sind noch mit Prüfungen belegt:\n\n"
+                        + "\n".join(occupied)
+                        + "\n\nBitte verschieben Sie diese Prüfungen oder parken Sie sie, "
+                          "bevor Sie die Slotzahl verringern. Die Einstellungen bleiben unverändert."
+                    )
+                    return
             self.dc.settings.time = new_time
+            for item in self.dc.schedule:
+                self.dc.recompute_item_time(item)
+            self.dc.evaluate_conflicts()
+            self.dc.evaluate_fair_day_distribution()
             self.dc.dataChanged.emit()
             self.refresh_views()
             # Dirty-Flag nur setzen, wenn sich etwas geändert hat
             try:
                 changed = False
                 # Versuche feldweisen Vergleich gängiger Attribute
-                for attr in ("n_slots", "start_time", "slot_len_min", "break_len_min", "week1_date", "week2_date"):
+                for attr in ("n_slots", "start_time", "slot_len_min", "break_len_min", "week1_date", "week2_date",
+                             "prep_duration_min", "prep_buffer_min"):
                     if getattr(old_time, attr, None) != getattr(new_time, attr, None):
                         changed = True
                         break
@@ -3818,6 +3900,52 @@ class MainWindow(QMainWindow):
         if self._solver_is_running():
             QMessageBox.information(self, "Solver läuft", "Ein Planungsdurchlauf ist bereits aktiv. Bitte warten Sie auf dessen Abschluss.")
             return
+
+        rooms = [
+            str(room or "").strip()
+            for room in (getattr(self.dc.settings, "rooms", None) or [])
+            if str(room or "").strip()
+        ]
+        if not rooms:
+            QMessageBox.information(
+                self,
+                "Hinweis",
+                "Bitte legen Sie unter Einstellungen > Räume mindestens einen Prüfungsraum an.",
+            )
+            return
+
+        try:
+            n_slots = int(getattr(self.dc.settings.time, "n_slots", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            n_slots = 0
+        if n_slots < 1:
+            QMessageBox.information(
+                self,
+                "Hinweis",
+                "Bitte legen Sie unter Einstellungen > Zeit mindestens einen Slot pro Tag fest.",
+            )
+            return
+
+        constraints = self.dc.settings.constraints
+        blocked_days = {
+            str(token or "").strip()
+            for token in (getattr(constraints, "no_exam_days", None) or [])
+            if str(token or "").strip()
+        }
+        available_days = [
+            f"{day}{week}"
+            for week in K.WEEKS
+            for day in K.DAYS
+            if f"{day}{week}" not in blocked_days
+        ]
+        if not available_days:
+            QMessageBox.information(
+                self,
+                "Hinweis",
+                "Alle Tage der Planungswochen sind gesperrt. Bitte geben Sie unter Einstellungen > Bedingungen mindestens einen Prüfungstag frei.",
+            )
+            return
+
         self.logWin.show()
         self.dc.status("Solver gestartet...")
 
@@ -3839,6 +3967,11 @@ class MainWindow(QMainWindow):
 
     def _on_solver_finished(self, schedule_rows, status):
         self._solver_pending = False
+        report = getattr(self.dc, "solver_feedback", {})
+        if status not in (K.cp_model.OPTIMAL, K.cp_model.FEASIBLE):
+            self.dc.status(report.get("summary", f"Solver beendet: {K.status_to_str(status)}"))
+            self._show_solver_feedback(report, status)
+            return
         # Plan in GUI bernehmen
         # Wichtig: Items ohne zugewiesenen Raum (leer/None) sind "geparkt" und
         # erhalten Woche/Tag/SlotIndex/Uhrzeit = None sowie Raum = "".
@@ -3873,12 +4006,76 @@ class MainWindow(QMainWindow):
         # Faire Tagesverteilung neu bewerten
         self.dc.evaluate_fair_day_distribution()
         self.dc.dataChanged.emit()
-        self.dc.status("Zuteilung abgeschlossen.")
+        parked_count = sum(not item.Raum for item in self.dc.schedule)
+        self.dc.status(f"Zuteilung abgeschlossen: {len(self.dc.schedule) - parked_count} Prüfungen mit Raum, "
+                       f"{parked_count} im Parkplatz. Ergebnisbericht beachten.")
         self.refresh_views()
         # Nach Solverlauf gilt der neue Plan als geändert
         self.dc._dirty = True
         # Zählung nach Solverlauf aktualisieren
         self._update_day_counts_label()
+        # Die Live-Prüfung bewertet den tatsächlich übernommenen Raumplan und
+        # weitere GUI-Regeln; Abweichungen ergänzen den CP-Zeitmodellbericht.
+        live_issues = []
+        for exam_idx, (level, reasons) in self.dc.conflict_map.items():
+            if level in ("hard", "soft"):
+                live_issues.append(f"Prüfung #{exam_idx}: {'harte Regel' if level == 'hard' else 'Wunsch'}: "
+                                   + "; ".join(reasons))
+        if live_issues:
+            report.setdefault("room_notes", []).extend(live_issues)
+        late_students = {}
+        for item in self.dc.schedule:
+            if self.dc.fair_day_map.get(item.ExamIdx):
+                late_students.setdefault(item.Schueler, []).append(item.SlotIndex)
+        for student, slots in late_students.items():
+            report.setdefault("wishes", []).append(
+                f"Späte Prüfungslagen {student}: Slotindexsumme {sum(slots)} "
+                f"statt höchstens {self.dc.settings.constraints.fair_day_distribution_slotsum} "
+                "(GUI-Bewertung, kein Solverziel).")
+        self._show_solver_feedback(report, status)
+
+    def _show_solver_feedback(self, report, status):
+        """Kompakter Abschluss mit vollständigen, kopierbaren Diagnosedetails."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Solver – Ergebnis und Hinweise")
+        box.setTextFormat(Qt.PlainText)
+        box.setIcon(QMessageBox.Information if status in (K.cp_model.OPTIMAL, K.cp_model.FEASIBLE)
+                    else QMessageBox.Warning)
+        box.setText(report.get("summary", f"Solverstatus: {K.status_to_str(status)}"))
+        if status in (K.cp_model.OPTIMAL, K.cp_model.FEASIBLE):
+            hints = report.get("findings", []) + report.get("room_notes", [])
+            wishes = report.get("wishes", [])
+            box.setInformativeText(f"{len(wishes)} Hinweise zu Wünschen; "
+                                   f"{len(hints)} Hinweise zu Modellgrenzen/Raumplan.\n"
+                                   "Die Meldungen finden Sie unter Details.")
+        else:
+            findings = report.get("findings", [])
+            box.setInformativeText(f"{len(findings)} Hinweise zu Engstellen; "
+                                   f"{len(report.get('suggestions', []))} Hinweise zu nächsten Schritten.\n"
+                                   "Der bisherige Plan bleibt erhalten. Die Meldungen finden Sie unter Details.")
+        box.setDetailedText(K.format_feedback(report))
+        def enlarge_feedback():
+            # Erst nach der initialen Qt-Layoutberechnung skalieren. Eine
+            # unsichtbare Breitenvorgabe bleibt auch beim Auf-/Zuklappen erhalten.
+            grid = box.layout()
+            margins = grid.contentsMargins()
+            target_width = round(box.width() * 1.5)
+            width = target_width - margins.left() - margins.right()
+            width_guard = QWidget(box)
+            width_guard.setMinimumWidth(width)
+            width_guard.setFixedHeight(0)
+            grid.addWidget(width_guard, grid.rowCount(), 0, 1, grid.columnCount())
+            details = box.findChild(QTextEdit)
+            if details is not None:
+                details.setFixedHeight(round(details.height() * 1.5))
+            box.adjustSize()
+            def correct_width():
+                # QMessageBox ergänzt Abstände beim nächsten Layoutdurchlauf.
+                width_guard.setMinimumWidth(max(0, width - (box.width() - target_width)))
+                box.adjustSize()
+            QTimer.singleShot(0, correct_width)
+        QTimer.singleShot(0, enlarge_feedback)
+        box.exec()
 
     def _apply_after_undo_redo(self, msg: Optional[str]):
         # Nach Undo/Redo: Konflikte neu, Views aktualisieren, Status zeigen
@@ -4123,9 +4320,10 @@ class MainWindow(QMainWindow):
         self.parkingView.verticalHeader().setVisible(False)
         self.parkingView.verticalHeader().setDefaultSectionSize(BLOCK_HEIGHT_MAX)
         self.parkingView.verticalHeader().setMinimumSectionSize(BLOCK_HEIGHT_MIN)
-        self.parkingView.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.parkingView.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for i in range(1):
             self.parkingView.setColumnWidth(i, 160)
+        self._refresh_workload_table()
         self._update_undo_redo_actions()
         # Nach Refresh auch faire Tagesverteilung neu bewerten (falls UI-nderungen vorher)
         try:
@@ -4616,6 +4814,12 @@ class TimeDialog(QDialog):
 
         self.spin_slotlen = QSpinBox(); self.spin_slotlen.setRange(1, 600); self.spin_slotlen.setValue(t.slot_len_min)
         self.spin_break = QSpinBox(); self.spin_break.setRange(0, 600); self.spin_break.setValue(t.break_len_min)
+        self.spin_prep_duration = QSpinBox()
+        self.spin_prep_duration.setRange(1, 600)
+        self.spin_prep_duration.setValue(t.prep_duration_min)
+        self.spin_prep_buffer = QSpinBox()
+        self.spin_prep_buffer.setRange(0, 600)
+        self.spin_prep_buffer.setValue(t.prep_buffer_min)
 
         self.date_w1 = QDateEdit(); self.date_w1.setCalendarPopup(True)
         self.date_w2 = QDateEdit(); self.date_w2.setCalendarPopup(True)
@@ -4629,7 +4833,9 @@ class TimeDialog(QDialog):
         form.addRow("Anzahl Slots/Tag", self.spin_slots)
         form.addRow("Startzeit", self.time_start)
         form.addRow("Slotlänge (Min)", self.spin_slotlen)
-        form.addRow("Pausenlänge (Min)", self.spin_break)
+        form.addRow("Pause zwischen Prüfungen (Min)", self.spin_break)
+        form.addRow("Vorbereitungsdauer (Min)", self.spin_prep_duration)
+        form.addRow("Puffer Vorbereitung → Prüfung (Min)", self.spin_prep_buffer)
         form.addRow("Startdatum Woche 1 (Mo)", self.date_w1)
         form.addRow("Startdatum Woche 2 (Mo)", self.date_w2)
 
@@ -4646,6 +4852,8 @@ class TimeDialog(QDialog):
         t.start_time = self.time_start.time().toString("HH:mm")
         t.slot_len_min = int(self.spin_slotlen.value())
         t.break_len_min = int(self.spin_break.value())
+        t.prep_duration_min = int(self.spin_prep_duration.value())
+        t.prep_buffer_min = int(self.spin_prep_buffer.value())
         if self.date_w1.date().isValid():
             t.week1_date = self.date_w1.date().toString("yyyy-MM-dd")
         if self.date_w2.date().isValid():
