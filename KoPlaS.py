@@ -1,10 +1,15 @@
-Version = "1.2.10 (Build 56)"
+Version = "1.2.10 (Build 57)"
+
+# Build 57: Live-Planvorschau in die Hauptanwendung integriert.
 
 import sys
 import os
 import json
 import traceback
 import threading
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Tuple, Optional, Set, Any
 from datetime import datetime, timedelta
@@ -14,13 +19,14 @@ from PySide6.QtCore import (
     QThread, QEvent, QTimer
 )
 from PySide6.QtGui import (
-    QKeySequence, QAction, QFont, QFontMetricsF, QColor, QPainter, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
+    QKeySequence, QAction, QFont, QFontMetricsF, QColor, QPainter, QPen, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView, QAbstractItemDelegate,
     QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QSpinBox, QDoubleSpinBox,
     QTimeEdit, QDateEdit, QFormLayout, QCheckBox, QPlainTextEdit, QStatusBar, QMenuBar,
     QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QHeaderView, QPushButton, QMenu, QTextEdit,
+    QTableWidget, QTableWidgetItem,
     QInputDialog, QListWidget, QListWidgetItem
 )
 
@@ -5850,10 +5856,543 @@ class LogWindow(QDialog):
         self.text.appendPlainText(msg)
 
 # -------------------------
+# Integrierte Live-Vorschau
+# -------------------------
+class PreviewBridge(QObject):
+    """Queued signals safely move preview updates from solver thread to GUI."""
+
+    snapshot_ready = Signal(object)  # complete MIP plan rows, including rooms
+    progress_ready = Signal(object)   # CP-SAT incumbent counter; must not clear plan grid
+    callback_log = Signal(str)
+
+
+bridge = PreviewBridge()
+preview_dispatchers = []
+preview_sessions = {}
+OCCUPIED_COLOR = QColor("#79cf8a")
+RELEASED_COLOR = QColor("#ef8585")
+REPLACED_COLOR = QColor("#f4ae55")
+EMPTY_COLOR = QColor("white")
+LOG_WIDTH_REFERENCE = (
+    "[17:39:37] Laufzeit 3s | 46 Lösungen | Abstand: 3 Schüler betroffen | Schülerslotsumme: Ø 4,2 | "
+    "Start Slot 3: 77 abweichend | Einsatztage: Ø 2,8 | Tagesabweichung: 12 | Fachpersonal: 2 Engpasstage | Fachanschlüsse: 12"
+)
+
+
+class SlotBoundaryDelegate(QStyledItemDelegate):
+    """Draw a stronger separator after the last slot of each day."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        next_row = index.row() + 1
+        if next_row < index.model().rowCount() and index.data(Qt.UserRole) != index.model().index(next_row, index.column()).data(Qt.UserRole):
+            painter.save()
+            painter.setPen(QPen(QColor("#666666"), 2))
+            painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+            painter.restore()
+
+
+def _log_mip_status(message: str) -> None:
+    bridge.callback_log.emit(f"[{time.strftime('%H:%M:%S')}] [MIP] {message}")
+
+
+class LiveLogWindow(QDialog):
+    """Existing log window extended with a read-only live plan above the log."""
+
+    def __init__(self, parent, dc: DataController):
+        super().__init__(parent)
+        self.setWindowTitle("Solver-Liveansicht und Logbuch")
+        if parent is not None:
+            self.setGeometry(parent.frameGeometry())
+        else:
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                self.setGeometry(screen.availableGeometry())
+            else:
+                self.resize(1200, 850)
+        center = self.geometry().center()
+        initial_height = max(1, self.height() // 2)
+        self.resize(max(1, self.width() // 2), round(initial_height * 1.5))
+        self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+        self.dc = dc
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        splitter = QSplitter(Qt.Vertical, self)
+        self.plan_label = QLabel("Warte auf die erste vollständige CP-SAT-/MIP-Zwischenlösung")
+        self.plan_label.setWordWrap(True)
+        plan_panel = QWidget(self)
+        plan_layout = QVBoxLayout(plan_panel)
+        plan_layout.setContentsMargins(0, 0, 0, 0)
+        plan_layout.setSpacing(2)
+        plan_layout.addWidget(self.plan_label)
+        self.plan_view = QTableWidget(self)
+        self.plan_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.plan_view.setSelectionMode(QAbstractItemView.NoSelection)
+        self.plan_view.verticalHeader().setVisible(False)
+        self.plan_view.horizontalHeader().setVisible(True)
+        self.plan_view.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self.plan_view.setWordWrap(True)
+        self.plan_view.setShowGrid(True)
+        self.plan_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plan_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plan_view.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.plan_view.verticalHeader().setMinimumSectionSize(1)
+        self.plan_view.horizontalHeader().setMinimumSectionSize(1)
+        self.plan_view.setItemDelegate(SlotBoundaryDelegate(self))
+        self._occupied_cells = set()
+        self._released_cells = {}
+        self._cell_exam_ids = {}
+        self._replaced_cells = {}
+        self._release_timer = QTimer(self)
+        self._release_timer.setSingleShot(True)
+        self._release_timer.timeout.connect(self._clear_released_slots)
+        self.plan_view.setFont(QFont(self.plan_view.font().family(), 7))
+        header_font = QFont(self.plan_view.font().family(), 14)
+        header_font.setBold(True)
+        self.plan_view.horizontalHeader().setFont(header_font)
+        self._rebuild_plan_grid(list(dc.settings.rooms or []))
+        plan_layout.addWidget(self.plan_view, 1)
+        splitter.addWidget(plan_panel)
+
+        status_panel = QWidget(self)
+        status_layout = QVBoxLayout(status_panel)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(2)
+        status_layout.addWidget(QLabel("Solver- und Anwendungsprotokoll"))
+        self.text = QPlainTextEdit(status_panel)
+        self.text.setReadOnly(True)
+        self._has_solver_output = False
+        status_layout.addWidget(self.text, 1)
+        splitter.addWidget(status_panel)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([max(1, int(self.height() * 0.78)), max(1, int(self.height() * 0.22))])
+        layout.addWidget(splitter, 1)
+        self.splitter = splitter
+        self.resize(self._initial_log_width(), self.height())
+        self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+        self._final_preview_received = False
+        self._last_preview_number = -1
+        dc.logMessage.connect(self.append)
+        bridge.callback_log.connect(self._append_solver)
+        bridge.snapshot_ready.connect(self._render_complete_plan)
+        bridge.progress_ready.connect(self._update_progress_label)
+        QTimer.singleShot(0, self._fit_table_to_view)
+
+    def _initial_log_width(self) -> int:
+        """Allow the reference line plus margins and a visible scrollbar."""
+        metrics = QFontMetricsF(self.text.font(), self.text)
+        text_width = metrics.horizontalAdvance(LOG_WIDTH_REFERENCE)
+        margins = self.layout().contentsMargins()
+        overhead = (
+            margins.left() + margins.right()
+            + 2 * self.text.frameWidth()
+            + 2 * self.text.document().documentMargin()
+            + self.text.verticalScrollBar().sizeHint().width()
+            + 16
+        )
+        return int(text_width + overhead) + 1
+
+    def _grid_settings(self):
+        return (tuple(str(room) for room in self.dc.settings.rooms or []),
+                max(0, int(self.dc.settings.time.n_slots or 0)),
+                tuple(sorted(self.dc.settings.constraints.no_exam_days or [])))
+
+    def prepare_for_solver(self, clear_previous_log: bool = False) -> None:
+        if clear_previous_log and self._has_solver_output:
+            self.text.clear()
+            self._has_solver_output = False
+        self._final_preview_received = False
+        self._last_preview_number = -1
+        self._rebuild_plan_grid(list(self.dc.settings.rooms or []))
+        self.plan_label.setText("Warte auf die erste vollständige CP-SAT-/MIP-Zwischenlösung")
+
+    def showEvent(self, event) -> None:
+        # The log window is constructed before imports and settings are edited.
+        if self._grid_settings() != self._grid_signature:
+            self.prepare_for_solver()
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_table_to_view)
+
+    def _rebuild_plan_grid(self, rooms: List[str]) -> None:
+        """Show every planning day; blocked days stay white and cannot be filled."""
+        self.rooms = [str(room) for room in rooms]
+        self._grid_signature = self._grid_settings()
+        slots_per_day = self._grid_signature[1]
+        blocked_days = set(self._grid_signature[2])
+        rows = [
+            (week, day, slot)
+            for week in WEEKS
+            for day in range(5)
+            for slot in range(slots_per_day)
+        ]
+        self.plan_view.clear()
+        self._release_timer.stop()
+        self._occupied_cells.clear()
+        self._released_cells.clear()
+        self._cell_exam_ids.clear()
+        self._replaced_cells.clear()
+        self.plan_view.setRowCount(len(rows))
+        self.room_column_offset = 0
+        self.plan_view.setColumnCount(self.room_column_offset + len(self.rooms))
+        self.plan_view.setHorizontalHeaderLabels(self.rooms)
+        self._row_by_slot = {}
+        for row_index, (week, day, slot) in enumerate(rows):
+            if f"{DAYS[day]}{week}" not in blocked_days:
+                self._row_by_slot[(week, day, slot)] = row_index
+            values = [""] * len(self.rooms)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setBackground(EMPTY_COLOR)
+                item.setData(Qt.UserRole, (week, day))
+                self.plan_view.setItem(row_index, col, item)
+            self.plan_view.setRowHeight(row_index, 18)
+        self.visible_blocks = 0
+        self._fit_table_to_view()
+
+    def _fit_table_to_view(self) -> None:
+        """Fit every day/slot row and room column into the available window."""
+        if not hasattr(self, "plan_view") or self.plan_view.width() <= 0:
+            return
+        header = self.plan_view.horizontalHeader().height()
+        available_height = max(1, self.plan_view.height() - header - 2)
+        row_count = max(1, self.plan_view.rowCount())
+        row_height = max(1, available_height // row_count)
+        for row in range(row_count):
+            self.plan_view.setRowHeight(row, row_height)
+
+        available_width = max(1, self.plan_view.viewport().width())
+        room_count = max(1, len(self.rooms))
+        room_width = max(1, (available_width - 4) // room_count)
+        for col in range(self.room_column_offset, self.plan_view.columnCount()):
+            self.plan_view.setColumnWidth(col, room_width)
+
+        # Keep the slot grid compact; room headers have their own larger font.
+        font_size = max(4, min(8, row_height // 3))
+        self.plan_view.setFont(QFont(self.plan_view.font().family(), font_size))
+        self.plan_view.setWordWrap(True)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_table_to_view)
+
+    def _render_complete_plan(self, update: Any) -> None:
+        if not isinstance(update, dict) or not update.get("rooms_ready"):
+            return
+        if self._final_preview_received and not update.get("is_final"):
+            return
+        try:
+            number = int(update.get("solution_number", -1))
+        except (TypeError, ValueError):
+            return
+        if number < self._last_preview_number:
+            return
+        self._last_preview_number = number
+        if update.get("is_final"):
+            self._final_preview_received = True
+        rooms = [str(room) for room in update.get("rooms", self.rooms)]
+        if rooms != self.rooms:
+            self._rebuild_plan_grid(rooms)
+        columns = {room: i for i, room in enumerate(self.rooms)}
+        occupied = set()
+        exam_ids = defaultdict(set)
+        for exam in update.get("rows", []):
+            try:
+                cell = (self._row_by_slot[(int(exam["Woche"]), DAYS.index(exam["Tag"]), int(exam["SlotIndex"]))], columns[str(exam["Raum"])])
+            except (KeyError, ValueError, TypeError):
+                continue
+            occupied.add(cell)
+            exam_id = exam.get("ExamIdx")
+            identity = (("idx", str(exam_id)) if exam_id is not None else
+                        tuple(str(exam.get(field) or "") for field in
+                              ("Schueler", "Fach", "Thema", "Pruefer", "Beisitzer")))
+            exam_ids[cell].add(identity)
+        now = time.monotonic()
+        for cell in self._occupied_cells - occupied:
+            self._replaced_cells.pop(cell, None)
+            self._released_cells[cell] = now + 0.3
+            self.plan_view.item(*cell).setBackground(RELEASED_COLOR)
+        for cell in occupied:
+            self._released_cells.pop(cell, None)
+            if cell in self._occupied_cells and self._cell_exam_ids.get(cell) != exam_ids[cell]:
+                self._replaced_cells[cell] = now + 0.3
+            color = REPLACED_COLOR if cell in self._replaced_cells else OCCUPIED_COLOR
+            self.plan_view.item(*cell).setBackground(color)
+        self._occupied_cells = occupied
+        self._cell_exam_ids = dict(exam_ids)
+        self.visible_blocks = len(occupied)
+        self._clear_released_slots()
+        prefix = "Endplan" if update.get("is_final") else "Live-Plan"
+        self.plan_label.setText(f"{prefix} · Lösung #{number} · {len(occupied)} belegte Slots")
+
+    def _clear_released_slots(self) -> None:
+        now = time.monotonic()
+        for cell, deadline in list(self._released_cells.items()):
+            if deadline <= now:
+                if cell not in self._occupied_cells:
+                    self.plan_view.item(*cell).setBackground(EMPTY_COLOR)
+                del self._released_cells[cell]
+        for cell, deadline in list(self._replaced_cells.items()):
+            if deadline <= now:
+                if cell in self._occupied_cells:
+                    self.plan_view.item(*cell).setBackground(OCCUPIED_COLOR)
+                del self._replaced_cells[cell]
+        deadlines = [*self._released_cells.values(), *self._replaced_cells.values()]
+        if deadlines:
+            remaining = min(deadlines) - now
+            self._release_timer.start(max(1, int(remaining * 1000) + 1))
+        else:
+            self._release_timer.stop()
+
+    def append(self, message: str) -> None:
+        parent = self.parent()
+        if parent is not None and getattr(parent, "_solver_pending", False):
+            self._has_solver_output = True
+        self.text.appendPlainText(message)
+
+    def _append_solver(self, message: str) -> None:
+        self._has_solver_output = True
+        self.append(message)
+
+    def _update_progress_label(self, update: Any) -> None:
+        if not isinstance(update, dict) or self._final_preview_received:
+            return
+        number = update.get("solution_number", "?")
+        suffix = " · MIP-Zwischenplan wird berechnet" if update.get("mip_pending") else ""
+        self.plan_label.setText(f"Letzter vollständiger Live-Plan bleibt sichtbar · CP-SAT-Lösung #{number}{suffix}")
+
+
+def _snapshot_from_callback(callback: Any, scheduler: Any) -> List[Dict[str, Any]]:
+    """Copy the complete feasible incumbent from CP-SAT; no room MIP is run."""
+    result = []
+    for exam in scheduler.exams:
+        selected = next(
+            (gslot for gslot in range(len(scheduler.all_slots))
+             if callback.BooleanValue(scheduler.x[(exam.idx, gslot)])),
+            None,
+        )
+        if selected is None:
+            continue
+        week, day, slot = scheduler.all_slots[selected]
+        result.append({
+            "ExamIdx": exam.idx,
+            "Schueler": exam.schueler,
+            "Fach": exam.fach,
+            "Thema": exam.thema,
+            "Pruefer": exam.pruefer,
+            "Beisitzer": exam.beisitzer,
+            "Woche": week,
+            "Tag": DAYS[day],
+            "SlotIndex": slot,
+        })
+    return result
+
+
+def _assign_rooms_for_snapshot(scheduler: Any, rows: List[Dict[str, Any]], solution_number: int) -> Dict[str, Any]:
+    """Run the same per-day MIP room assignment used by final extraction."""
+    _log_mip_status(f"Start Raumvergabe für Lösung #{solution_number}")
+    by_day: Dict[Tuple[int, int], List[Tuple[Any, int]]] = defaultdict(list)
+    exams_by_idx = {exam.idx: exam for exam in scheduler.exams}
+    for row in rows:
+        day_idx = DAYS.index(row["Tag"])
+        by_day[(int(row["Woche"]), day_idx)].append(
+            (exams_by_idx[row["ExamIdx"]], int(row["SlotIndex"]))
+        )
+    room_by_exam: Dict[int, Any] = {}
+    for (week, day), day_exams in sorted(by_day.items()):
+        room_by_exam.update(scheduler.assign_rooms_for_day_mip(day_exams, week, day))
+    with_rooms = [dict(row, Raum=room_by_exam.get(row["ExamIdx"])) for row in rows]
+    return {
+        "rows": with_rooms,
+        "rooms": list(scheduler.params.rooms),
+        "solution_number": solution_number,
+        "rooms_ready": True,
+    }
+
+
+class RoomPreviewDispatcher:
+    """One background MIP at a time; newer pending snapshots replace stale ones."""
+
+    def __init__(self, scheduler: Any):
+        self.scheduler = scheduler
+        self.last_emitted_solution = 0
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="KoPlaS-preview-MIP")
+        # Bei bereits fertigen Futures läuft add_done_callback synchron im
+        # aufrufenden Thread und betritt die Sperre erneut.
+        self.lock = threading.RLock()
+        self.busy = False
+        self.pending = None
+        self.accepting_updates = True
+
+    def submit(self, rows: List[Dict[str, Any]], solution_number: int) -> None:
+        with self.lock:
+            if not self.accepting_updates:
+                return
+            self.pending = (rows, solution_number)
+            if not self.busy:
+                self._start_pending_locked()
+
+    def _start_pending_locked(self) -> None:
+        job = self.pending
+        self.pending = None
+        if job is None:
+            self.busy = False
+            return
+        rows, solution_number = job
+        self.busy = True
+        future = self.executor.submit(_assign_rooms_for_snapshot, self.scheduler, rows, solution_number)
+        future.add_done_callback(lambda result, number=solution_number: self._completed(result, number))
+
+    def _completed(self, future, solution_number: int) -> None:
+        try:
+            update = future.result()
+            _log_mip_status(f"Ende Raumvergabe für Lösung #{solution_number}")
+            # Auch den ersten fertigen Raumplan zeigen, wenn CP-SAT bereits
+            # weiter ist. Nur Rückschritte gegenüber Raumplänen verhindern.
+            if self.accepting_updates and solution_number > self.last_emitted_solution:
+                self.last_emitted_solution = solution_number
+                assigned = sum(bool(row.get("Raum")) for row in update["rows"])
+                _log_mip_status(f"Raumvorschau #{solution_number}: "
+                                f"{assigned}/{len(update['rows'])} Prüfungen mit Raum")
+                bridge.snapshot_ready.emit(update)
+        except Exception as exc:
+            _log_mip_status(f"Raumvergabe für Lösung #{solution_number} fehlgeschlagen: {exc}")
+        with self.lock:
+            self._start_pending_locked()
+
+    def shutdown(self, wait: bool = True) -> None:
+        with self.lock:
+            self.accepting_updates = False
+            self.pending = None
+        self.executor.shutdown(wait=wait)
+
+
+def install_live_preview() -> None:
+    """Install runtime-only hooks before MainWindow and SolverWorker are created."""
+    global LogWindow
+    LogWindow = LiveLogWindow
+    original_on_assign = MainWindow.on_assign
+
+    def assign_with_empty_preview(window):
+        was_running = window._solver_is_running()
+        result = original_on_assign(window)
+        # Only reset after all start checks passed. Worker signals are queued
+        # and will be displayed after this GUI handler returns.
+        if not was_running and window._solver_pending:
+            window.logWin.prepare_for_solver(clear_previous_log=True)
+        return result
+
+    MainWindow.on_assign = assign_with_empty_preview
+    cp_model = K.cp_model
+    original_scheduler_solve = K.ColloquiumScheduler.solve
+    original_extract_schedule = K.ColloquiumScheduler.extract_schedule
+    original_assign_rooms = K.ColloquiumScheduler.assign_rooms_for_day_mip
+    original_vprint = K.vprint
+    mip_log_context = threading.local()
+
+    def compact_vprint(*args, **kwargs):
+        if not getattr(mip_log_context, "active", False):
+            original_vprint(*args, **kwargs)
+
+    def assign_rooms_without_details(scheduler, *args, **kwargs):
+        previous = getattr(mip_log_context, "active", False)
+        mip_log_context.active = True
+        try:
+            return original_assign_rooms(scheduler, *args, **kwargs)
+        finally:
+            mip_log_context.active = previous
+
+    K.vprint = compact_vprint
+    K.ColloquiumScheduler.assign_rooms_for_day_mip = assign_rooms_without_details
+
+    def extract_with_final_preview(scheduler, solver):
+        # This is the very same extraction consumed by DataController and
+        # posted into the main planning view, including its room MIP results.
+        session = preview_sessions.get(id(scheduler))
+        solution_number = session["state"]["solution_number"] if session is not None else "?"
+        _log_mip_status(f"Start Raumvergabe für Endlösung #{solution_number}")
+        try:
+            rows = original_extract_schedule(scheduler, solver)
+        except Exception as exc:
+            _log_mip_status(f"Raumvergabe für Endlösung #{solution_number} fehlgeschlagen: {exc}")
+            raise
+        _log_mip_status(f"Ende Raumvergabe für Endlösung #{solution_number}")
+        if session is not None and rows and all(row.get("Raum") for row in rows):
+            solution_number = session["state"]["solution_number"]
+            bridge.snapshot_ready.emit({
+                "rows": rows,
+                "rooms": list(scheduler.params.rooms),
+                "solution_number": solution_number,
+                "rooms_ready": True,
+                "is_final": True,
+            })
+            bridge.callback_log.emit(
+                f"Live-Plan: finale Hauptfenster-Lösung #{solution_number} übernommen."
+            )
+        return rows
+
+    K.ColloquiumScheduler.extract_schedule = extract_with_final_preview
+
+    def solve_with_preview(scheduler, *args, **kwargs):
+        original_callback_base = cp_model.CpSolverSolutionCallback
+        state = {"last_emit": 0.0, "solution_number": 0}
+        dispatcher = RoomPreviewDispatcher(scheduler)
+        preview_dispatchers.append(dispatcher)
+        preview_sessions[id(scheduler)] = {"state": state}
+
+        class PreviewCallbackBase(original_callback_base):
+            def __init_subclass__(cls, **class_kwargs):
+                super().__init_subclass__(**class_kwargs)
+                original_callback = cls.__dict__.get("OnSolutionCallback")
+                if original_callback is None:
+                    return
+
+                def on_solution_with_preview(instance):
+                    state["solution_number"] += 1
+                    solution_number = state["solution_number"]
+                    now = time.monotonic()
+                    snapshot = None
+                    if solution_number == 1 or solution_number % 5 == 0:
+                        snapshot = _snapshot_from_callback(instance, scheduler)
+                        dispatcher.submit(snapshot, solution_number)
+                    # Keep callback work bounded and show only the newest
+                    # incumbent at most five times per second. MIP room
+                    # assignment runs separately on its own worker thread.
+                    if now - state["last_emit"] >= 0.2:
+                        bridge.progress_ready.emit({
+                            "solution_number": solution_number,
+                            "mip_pending": solution_number == 1 or solution_number % 5 == 0,
+                        })
+                        state["last_emit"] = now
+                    # Run KoPlaS's original progress calculation and logging
+                    # on the same callback instance, preserving its live data.
+                    original_callback(instance)
+
+                cls.OnSolutionCallback = on_solution_with_preview
+
+        # ColloquiumScheduler.solve defines FriendlyProgress inside the method.
+        # Temporarily replace the base symbol so its callback is instrumented
+        # at class creation and the existing progress callback remains intact.
+        cp_model.CpSolverSolutionCallback = PreviewCallbackBase
+        try:
+            return original_scheduler_solve(scheduler, *args, **kwargs)
+        finally:
+            # Only MIP results completed while CP-SAT is still searching may
+            # update the live preview. Do not let stale room jobs compete with
+            # final schedule extraction after this method returns.
+            dispatcher.shutdown(wait=False)
+            cp_model.CpSolverSolutionCallback = original_callback_base
+
+    K.ColloquiumScheduler.solve = solve_with_preview
+
+# -------------------------
 # main
 # -------------------------
 def main():
-    
+    install_live_preview()
     app = QApplication(sys.argv)
     
     #Übersetzungen installieren (vor dem Erzeugen von Widgets!)
