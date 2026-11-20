@@ -14,14 +14,9 @@ DAYS = ["Mo", "Di", "Mi", "Do", "Fr"]
 WEEKS = [1, 2]
 MIP_ROOM_SOLVER_LIMIT = 1200.0
 MIP_ROOM_SOLVER_WORKER = 0
-MIP_ROOM_GAP_WEIGHT = 2000
 MIP_ROOM_SOFTENING = 10000
 
 CP_WORKERS = 0
-
-GAP_WEIGHT_INNER = 4000
-GAP_WEIGHT_OUTER = 2000
-SPAN_WEIGHT = 200
 
 SECOND_SLOT_WEIGHT = 1000
 
@@ -229,9 +224,7 @@ class ColloquiumScheduler:
                 if e.beisitzer and e.beisitzer.strip() != "":
                     self._exams_by_teacher[e.beisitzer].append(e)
 
-        # pro (Lehrer, (w,d)) -> Dict mit:
-        #   "b": List[BoolVar] belegter Slots (lokale Slot-Indexierung innerhalb Tages)
-        #   "sum_slot": List[LinExpr] Summe x[(e, gslot)] über Exams des Lehrers im globalen Slot
+        # pro (Lehrer, (w,d)) -> belegte Slots (lokale Slot-Indexierung innerhalb des Tages)
         self._teacher_day_struct: Dict[Tuple[str, int, int], Dict[str, List]] = {}
 
         vprint("[Init] Prüfungen:", len(self.exams),
@@ -246,14 +239,13 @@ class ColloquiumScheduler:
             pass
 
     def _build_teacher_day_struct(self):
-        # Einmalige Konstruktion b- und Summen-Vektoren pro (Prüfer, Tag) für Wiederverwendung
+        # Einmalige Konstruktion belegter Slots pro Person und Tag.
         for teacher, exs in self._exams_by_teacher.items():
             for (w, d), day_slots in self.day_to_gslots.items():
                 nslots = len(day_slots)
                 if nslots == 0:
                     continue
                 b = [self.model.NewBoolVar(f"b_{teacher}_w{w}d{d}_s{s}") for s in range(nslots)]
-                sum_slot = []
                 for s_local, gslot in enumerate(day_slots):
                     slot_sum = sum(self.x[(e.idx, gslot)] for e in exs)
                     # Kopplung b[s] == (slot_sum >= 1)
@@ -261,8 +253,7 @@ class ColloquiumScheduler:
                     # Hier erlauben wir ">=1" via <=/>=:
                     self.model.Add(b[s_local] >= slot_sum)
                     self.model.Add(b[s_local] <= slot_sum)
-                    sum_slot.append(slot_sum)
-                self._teacher_day_struct[(teacher, w, d)] = {"b": b, "sum_slot": sum_slot}
+                self._teacher_day_struct[(teacher, w, d)] = {"b": b}
 
     def add_basic_constraints(self):
         vprint("[Constraints] Grundregeln werden vorbereitet ")
@@ -505,7 +496,7 @@ class ColloquiumScheduler:
             for (w, d), day_slots in self.day_to_gslots.items():
                 self.model.Add(sum(self.x[(e.idx, g)] for e in exs for g in day_slots) <= max_per_day)
 
-        # NEU: Einmal b/sum_slot vorbereiten (für harte Lücken & weiche Kompaktheit)
+        # Belegte Slots einmalig für die harte Lückenregel vorbereiten.
         self._build_teacher_day_struct()
 
         # 8) Keine Lücken pro Prüfer/Tag (hart) – effizient via gemeinsamen b-Vektoren
@@ -673,91 +664,7 @@ class ColloquiumScheduler:
                 for _ in range(w_perm_adjacent):
                     self.soft_terms.append(slack)
 
-        # 4) Weiche Kompaktheit pro Prüfer/Tag – reuse b-Vektoren
-        gap_weight_inner   = GAP_WEIGHT_INNER
-        gap_weight_outer   = GAP_WEIGHT_OUTER
-        span_weight        = SPAN_WEIGHT
-
-        for teacher, _ in self._exams_by_teacher.items():
-            for (w, d), _day_slots in self.day_to_gslots.items():
-                key = (teacher, w, d)
-                if key not in self._teacher_day_struct:
-                    continue
-                b = self._teacher_day_struct[key]["b"]
-                nslots = len(b)
-                if nslots == 0:
-                    continue
-
-                prefix = [self.model.NewIntVar(0, nslots, f"soft_pref_{teacher}_w{w}d{d}_s{s}") for s in range(nslots)]
-                suffix = [self.model.NewIntVar(0, nslots, f"soft_suff_{teacher}_w{w}d{d}_s{s}") for s in range(nslots)]
-                self.model.Add(prefix[0] == b[0])
-                for s in range(1, nslots):
-                    self.model.Add(prefix[s] == prefix[s-1] + b[s])
-                self.model.Add(suffix[nslots-1] == b[nslots-1])
-                for s in range(nslots-2, -1, -1):
-                    self.model.Add(suffix[s] == suffix[s+1] + b[s])
-
-                left_pos  = [self.model.NewBoolVar(f"soft_left_{teacher}_w{w}d{d}_s{s}") for s in range(nslots)]
-                right_pos = [self.model.NewBoolVar(f"soft_right_{teacher}_w{w}d{d}_s{s}") for s in range(nslots)]
-                for s in range(nslots):
-                    self.model.Add(prefix[s] >= 1).OnlyEnforceIf(left_pos[s])
-                    self.model.Add(prefix[s] <= 0).OnlyEnforceIf(left_pos[s].Not())
-                    self.model.Add(suffix[s] >= 1).OnlyEnforceIf(right_pos[s])
-                    self.model.Add(suffix[s] <= 0).OnlyEnforceIf(right_pos[s].Not())
-
-                # Wenn harte Lücken aktiv (wie oben), reduzieren wir die weiche Doppelstrafe:
-                # Hier lassen wir Outer-Strafen bestehen (für Ränder), Inner-Strafen werden geringer gewichtet.
-                inner_weight = gap_weight_inner // 2  # Halbierung, um Doppelzählung zu entschärfen
-
-                for s in range(nslots):
-                    both = self.model.NewBoolVar(f"soft_both_{teacher}_w{w}d{d}_s{s}")
-                    self.model.AddBoolAnd([left_pos[s], right_pos[s]]).OnlyEnforceIf(both)
-                    self.model.AddBoolOr([left_pos[s].Not(), right_pos[s].Not()]).OnlyEnforceIf(both.Not())
-
-                    gap_inner = self.model.NewBoolVar(f"soft_gap_inner_{teacher}_w{w}d{d}_s{s}")
-                    self.model.Add(gap_inner <= both)
-                    self.model.Add(gap_inner <= 1 - b[s])
-
-                    if inner_weight > 0:
-                        term = self.model.NewIntVar(0, inner_weight, f"soft_gi_term_{teacher}_w{w}d{d}_s{s}")
-                        self.model.Add(term == inner_weight).OnlyEnforceIf(gap_inner)
-                        self.model.Add(term == 0).OnlyEnforceIf(gap_inner.Not())
-                        self.soft_terms.append(term)
-
-                for s in range(nslots):
-                    outside = self.model.NewBoolVar(f"soft_outside_{teacher}_w{w}d{d}_s{s}")
-                    both_lr = self.model.NewBoolVar(f"soft_bothlr_{teacher}_w{w}d{d}_s{s}")
-                    self.model.AddBoolAnd([left_pos[s], right_pos[s]]).OnlyEnforceIf(both_lr)
-                    self.model.AddBoolOr([left_pos[s].Not(), right_pos[s].Not()]).OnlyEnforceIf(both_lr.Not())
-                    self.model.Add(outside <= 1 - both_lr)
-                    self.model.Add(1 - outside <= both_lr)
-
-                    outer_free = self.model.NewBoolVar(f"soft_outer_free_{teacher}_w{w}d{d}_s{s}")
-                    self.model.Add(outer_free <= outside)
-                    self.model.Add(outer_free <= 1 - b[s])
-
-                    if gap_weight_outer > 0:
-                        term2 = self.model.NewIntVar(0, gap_weight_outer, f"soft_go_term_{teacher}_w{w}d{d}_s{s}")
-                        self.model.Add(term2 == gap_weight_outer).OnlyEnforceIf(outer_free)
-                        self.model.Add(term2 == 0).OnlyEnforceIf(outer_free.Not())
-                        self.soft_terms.append(term2)
-
-                count = self.model.NewIntVar(0, nslots, f"soft_count_{teacher}_w{w}d{d}")
-                self.model.Add(count == sum(b))
-
-                if span_weight > 0 and nslots >= 2:
-                    sum_left  = self.model.NewIntVar(0, nslots, f"soft_sumleft_{teacher}_w{w}d{d}")
-                    sum_right = self.model.NewIntVar(0, nslots, f"soft_sumright_{teacher}_w{w}d{d}")
-                    self.model.Add(sum_left  == sum(left_pos))
-                    self.model.Add(sum_right == sum(right_pos))
-
-                    span_proxy = self.model.NewIntVar(0, 2*nslots, f"soft_span_{teacher}_w{w}d{d}")
-                    self.model.Add(span_proxy >= sum_left + sum_right - 2*count)
-                    self.model.Add(span_proxy <= sum_left + sum_right)
-                    for _ in range(span_weight):
-                        self.soft_terms.append(span_proxy)
-
-        # 5) Gleichmäßigere Verteilung über erlaubte Tage (weich)
+        # 4) Gleichmäßigere Verteilung über erlaubte Tage (weich)
         allowed_days = [(w, d) for w in WEEKS for d in range(5) if (w, d) not in self.no_exam_days]
         if allowed_days:
             total_exams = len(self.exams)
@@ -1361,60 +1268,10 @@ class ColloquiumScheduler:
             for r in range(R):
                 model.Add(sum(z[(s, r, c)] for c in slot_clusters[s]) <= 1)
 
-        room_soft_terms = []
-
-        # NEU: tageweite Raumnutzungsindikatoren y[r] für Reihenfolgepräferenz
-        y = [model.NewBoolVar(f"y_r{r}") for r in range(R)]
-        for r in range(R):
-            for c in range(K):
-                model.Add(a[c][r] <= y[r])
-            sum_a_r = model.NewIntVar(0, K, f"sum_a_r{r}")
-            model.Add(sum_a_r == sum(a[c][r] for c in range(K)))
-            model.Add(y[r] <= sum_a_r)
-
-        # Lücken je Raum minimieren
-        for r in range(R):
-            nslots = len(local_slots)
-            if nslots == 0:
-                continue
-
-            b_r = []
-            for idx_s, s in enumerate(local_slots):
-                br = model.NewBoolVar(f"room_used_r{r}_s{idx_s}")
-                model.Add(br >= sum(z[(s, r, c)] for c in slot_clusters[s]))
-                b_r.append(br)
-
-            prefix = [model.NewIntVar(0, nslots, f"r{r}_pref_{i}") for i in range(nslots)]
-            suffix = [model.NewIntVar(0, nslots, f"r{r}_suff_{i}") for i in range(nslots)]
-            model.Add(prefix[0] == b_r[0])
-            for i in range(1, nslots):
-                model.Add(prefix[i] == prefix[i-1] + b_r[i])
-            model.Add(suffix[nslots-1] == b_r[nslots-1])
-            for i in range(nslots-2, -1, -1):
-                model.Add(suffix[i] == suffix[i+1] + b_r[i])
-
-            for i in range(nslots):
-                left_pos  = model.NewBoolVar(f"r{r}_left_{i}")
-                right_pos = model.NewBoolVar(f"r{r}_right_{i}")
-                model.Add(prefix[i] >= 1).OnlyEnforceIf(left_pos)
-                model.Add(prefix[i] <= 0).OnlyEnforceIf(left_pos.Not())
-                model.Add(suffix[i] >= 1).OnlyEnforceIf(right_pos)
-                model.Add(suffix[i] <= 0).OnlyEnforceIf(right_pos.Not())
-                both = model.NewBoolVar(f"r{r}_both_{i}")
-                model.AddBoolAnd([left_pos, right_pos]).OnlyEnforceIf(both)
-                model.AddBoolOr([left_pos.Not(), right_pos.Not()]).OnlyEnforceIf(both.Not())
-                gap_i = model.NewBoolVar(f"r{r}_gap_{i}")
-                model.Add(gap_i <= both)
-                model.Add(gap_i <= 1 - b_r[i])
-                room_soft_terms.append(gap_i)
-
-        # Ziel: Reihenfolgepräferenz + Lücken
-        # Entfernt: Präferenz 'vorderste Räume zuerst'
-        gap_weight = 1
-        tiny = 1
+        # Minimiere die bestehende Raumreihenfolgepräferenz. Die früheren
+        # Raumlückenvariablen konnten im Minimierungsmodell stets 0 bleiben.
         a_order_term = sum((r + 1) * a[c][r] for c in range(K) for r in range(R))
-        # Neue Zielfunktion ohne room_order_term
-        model.Minimize(gap_weight * sum(room_soft_terms) + tiny * a_order_term)
+        model.Minimize(a_order_term)
 
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = MIP_ROOM_SOLVER_LIMIT

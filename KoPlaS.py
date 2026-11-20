@@ -292,13 +292,9 @@ class ConstraintsSettings:
     soft_prefer_second_slot_start: bool = False
     weight_prefer_second_slot: int = 100  # Multiplikator wird im Solver mit SECOND_SLOT_WEIGHT kombiniert
 
-    # Solver-Limits und Gewichte (variabel)
+    # Solver-Limits und verbleibende Gewichte (variabel)
     cp_time_limit_sec: int = 3600
     mip_room_time_limit_sec: int = 480
-    MIP_ROOM_GAP_WEIGHT: int = 2000
-    GAP_WEIGHT_INNER: int = 4000
-    GAP_WEIGHT_OUTER: int = 2000
-    SPAN_WEIGHT: int = 200
     SECOND_SLOT_WEIGHT: int = 9000
     DAY_WEIGHT_BALANCE: int = 9000
     # Neues Verhalten: leere Beisitzer wie "" ignorieren
@@ -1038,7 +1034,14 @@ class DataController(QObject):
         self.exams = ex_list
         s = obj.get("settings", {})
         t = s.get("time", {})
-        c = s.get("constraints", {})
+        c = dict(s.get("constraints", {}) or {})
+        # Alte Pläne enthalten noch Strafwerte für Ziele, die nicht mehr Teil
+        # des Solver-Modells sind. Beim Laden werden diese Felder verworfen.
+        for obsolete_weight in (
+            "MIP_ROOM_GAP_WEIGHT", "GAP_WEIGHT_INNER",
+            "GAP_WEIGHT_OUTER", "SPAN_WEIGHT",
+        ):
+            c.pop(obsolete_weight, None)
         # prepare_room robust: ggf. leerer Default
         prepare_room_val = s.get("prepare_room", "")
         try:
@@ -1528,10 +1531,6 @@ class DataController(QObject):
         except Exception:
             pass
         try:
-            K.MIP_ROOM_GAP_WEIGHT = int(c.MIP_ROOM_GAP_WEIGHT)
-            K.GAP_WEIGHT_INNER = int(c.GAP_WEIGHT_INNER)
-            K.GAP_WEIGHT_OUTER = int(c.GAP_WEIGHT_OUTER)
-            K.SPAN_WEIGHT = int(c.SPAN_WEIGHT)
             K.SECOND_SLOT_WEIGHT = int(c.SECOND_SLOT_WEIGHT)
             K.DAY_WEIGHT_BALANCE = int(c.DAY_WEIGHT_BALANCE)
         except Exception:
@@ -4915,10 +4914,6 @@ class ConstraintsDialog(QDialog):
         # Limits/Gewichte
         self.spin_cp_time = QSpinBox(); self.spin_cp_time.setRange(1, MAX_CP_TIME_LIMIT); self.spin_cp_time.setValue(c.cp_time_limit_sec)
         self.spin_mip_time = QSpinBox(); self.spin_mip_time.setRange(1, MAX_MIP_TIME_LIMIT); self.spin_mip_time.setValue(c.mip_room_time_limit_sec)
-        self.spin_mip_gap_w = QSpinBox(); self.spin_mip_gap_w.setRange(0, 100000); self.spin_mip_gap_w.setValue(c.MIP_ROOM_GAP_WEIGHT)
-        self.spin_gi = QSpinBox(); self.spin_gi.setRange(0, 100000); self.spin_gi.setValue(c.GAP_WEIGHT_INNER)
-        self.spin_go = QSpinBox(); self.spin_go.setRange(0, 100000); self.spin_go.setValue(c.GAP_WEIGHT_OUTER)
-        self.spin_span = QSpinBox(); self.spin_span.setRange(0, 100000); self.spin_span.setValue(c.SPAN_WEIGHT)
         self.spin_second = QSpinBox(); self.spin_second.setRange(0, 100000); self.spin_second.setValue(c.SECOND_SLOT_WEIGHT)
         self.spin_balance = QSpinBox(); self.spin_balance.setRange(0, 100000); self.spin_balance.setValue(c.DAY_WEIGHT_BALANCE)
 
@@ -4957,10 +4952,6 @@ class ConstraintsDialog(QDialog):
         form.addRow("faire Tagesverteilung", hl_fair)
         form.addRow("Zeitlimit Zuteilung (s)", self.spin_cp_time)
         form.addRow("Zeitlimit Raumoptimierung (s)", self.spin_mip_time)
-        form.addRow("Strafe für Lücken", self.spin_mip_gap_w)
-        form.addRow("Strafe Kompaktheit", self.spin_gi)
-        form.addRow("Strafe Rand", self.spin_go)
-        form.addRow("Strafe Spannweite", self.spin_span)
         form.addRow("Strafe 2. Slot", self.spin_second)
         form.addRow("Strafe gleichmäßige Tagesverteilung", self.spin_balance)
 
@@ -5004,10 +4995,6 @@ class ConstraintsDialog(QDialog):
 
         c.cp_time_limit_sec = int(self.spin_cp_time.value())
         c.mip_room_time_limit_sec = int(self.spin_mip_time.value())
-        c.MIP_ROOM_GAP_WEIGHT = int(self.spin_mip_gap_w.value())
-        c.GAP_WEIGHT_INNER = int(self.spin_gi.value())
-        c.GAP_WEIGHT_OUTER = int(self.spin_go.value())
-        c.SPAN_WEIGHT = int(self.spin_span.value())
         c.SECOND_SLOT_WEIGHT = int(self.spin_second.value())
         c.DAY_WEIGHT_BALANCE = int(self.spin_balance.value())
         c.ignore_empty_beisitzer = bool(self.cb_ignore_empty_beisitzer.isChecked())

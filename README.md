@@ -73,12 +73,6 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 **Aktuelle Version: 1.2.10 (Build 56); Solver: 0.2 (Build 17)**
 
-### Version 1.2.11
-
-- Weiche Planungsziele vereinheitlicht und Rollentauschnähe entfernt; harte Personenregeln und gemeinsame Raumcluster bleiben erhalten.
-- Fachgleiche Prüferblöcke und Kommissionen werden bei Zeit- und Raumplanung berücksichtigt; Solverstatus und Ergebnisberichte wurden überarbeitet.
-- Planprüfung beim Laden und Speichern ergänzt. Inkonsistente Pläne bleiben zur Prüfung geöffnet; fehlerhafte Pläne können nicht gespeichert werden.
-
 ### Version 1.2.10
 
 - Gruppenbearbeitung für Raumwechsel und Beisitzer ergänzt; Bereichsauswahl, Drag-and-drop und Undo/Redo verbessert.
