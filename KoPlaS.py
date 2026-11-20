@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 57)"
+Version = "1.2.10 (Build 58)"
 
-# Build 57: Live-Planvorschau in die Hauptanwendung integriert.
+# Build 58: Beisitzer für markierte Prüfungen eines Raum-Tagesblocks gemeinsam ändern.
 
 import sys
 import os
@@ -16,16 +16,16 @@ from datetime import datetime, timedelta
 
 from PySide6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QSize, QRectF, Signal, QObject, QMimeData, QByteArray,
-    QThread, QEvent, QTimer
+    QThread, QEvent, QTimer, QItemSelectionModel
 )
 from PySide6.QtGui import (
     QKeySequence, QAction, QFont, QFontMetricsF, QColor, QPainter, QPen, QStandardItemModel, QStandardItem, QGuiApplication, QCursor
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView, QAbstractItemDelegate,
-    QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QSpinBox, QDoubleSpinBox,
+    QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,
     QTimeEdit, QDateEdit, QFormLayout, QCheckBox, QPlainTextEdit, QStatusBar, QMenuBar,
-    QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QHeaderView, QPushButton, QMenu, QTextEdit,
+    QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QHeaderView, QPushButton, QMenu, QTextEdit, QCompleter,
     QTableWidget, QTableWidgetItem,
     QInputDialog, QListWidget, QListWidgetItem
 )
@@ -573,6 +573,41 @@ class EditExamFieldCommand(BaseCommand):
             self._mirror_to_schedule(dc, self.before_val)
     def label(self) -> str:
         return f"{self.field_name} geändert"
+
+class EditExamBeisitzerBatchCommand(BaseCommand):
+    """Ändert Beisitzer mehrerer Prüfungen als eine Undo-/Redo-Aktion."""
+    def __init__(self, before_values: Dict[int, str], after_value: str):
+        self.before_values = {int(idx): str(value or "") for idx, value in before_values.items()}
+        self.after_values = {idx: str(after_value or "") for idx in self.before_values}
+
+    def _apply_values(self, dc: "DataController", values: Dict[int, str]):
+        exam_by_id = {exam.idx: exam for exam in dc.exams}
+        for exam_idx, value in values.items():
+            exam = exam_by_id.get(exam_idx)
+            if exam is not None:
+                exam.Beisitzer = value
+        for item in dc.schedule or []:
+            if item.ExamIdx in values:
+                item.Beisitzer = values[item.ExamIdx]
+        try:
+            dc.evaluate_conflicts()
+            dc.evaluate_fair_day_distribution()
+            dc.count_beisitzer(emit=False)
+            dc.calculate_belastung(emit=False)
+        except Exception:
+            pass
+        dc.dataChanged.emit()
+        dc.uiRefreshRequested.emit()
+        dc._dirty = True
+
+    def apply(self, dc: "DataController"):
+        self._apply_values(dc, self.after_values)
+
+    def revert(self, dc: "DataController"):
+        self._apply_values(dc, self.before_values)
+
+    def label(self) -> str:
+        return f"Beisitzer für {len(self.before_values)} Prüfungen geändert"
 
 class SearchDialog(QDialog):
     """
@@ -2546,6 +2581,16 @@ class RightDelegate(QStyledItemDelegate):
                 painter.drawLine(opt.rect.left(), y, opt.rect.right(), y)
         except Exception:
             pass
+
+        # Der Delegate zeichnet den Zellinhalt selbst und übermalt damit den
+        # standardmäßigen Qt-Auswahlhintergrund. Auswahl deshalb sichtbar umranden.
+        if opt.state & QStyle.State_Selected:
+            pen = painter.pen()
+            pen.setColor(QColor(0, 105, 210))
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(opt.rect.adjusted(2, 2, -2, -2))
         painter.restore()
 
 #-------------------------
@@ -2844,6 +2889,17 @@ class ExportPlanOptionsDialog(QDialog):
 # -------------------------
 # Hauptfenster
 # -------------------------
+class RightTableView(QTableView):
+    """Keep drag-and-drop single-item even while the view supports range selection."""
+    def startDrag(self, supportedActions):
+        current = self.currentIndex()
+        if current.isValid():
+            self.selectionModel().setCurrentIndex(
+                current, QItemSelectionModel.ClearAndSelect
+            )
+        super().startDrag(supportedActions)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2915,7 +2971,7 @@ class MainWindow(QMainWindow):
         self.leftView.setFixedWidth(260)
         self.leftView.setFont(FONT_DEFAULT)
 
-        self.rightView = QTableView()
+        self.rightView = RightTableView()
         rm = RightModel(self.dc)
         self.rightView.setModel(rm)
         self.rightView.setItemDelegate(RightDelegate(self.dc, self.rightView))
@@ -2952,7 +3008,7 @@ class MainWindow(QMainWindow):
         self.rightView.verticalHeader().setVisible(False)
         # DnD Einstellungen
         self.rightView.setSelectionBehavior(QTableView.SelectItems)
-        self.rightView.setSelectionMode(QTableView.SingleSelection)
+        self.rightView.setSelectionMode(QTableView.ExtendedSelection)
         self.rightView.setDragDropMode(QTableView.DragDrop)
         self.rightView.setDragEnabled(True)
         self.rightView.setAcceptDrops(True)
@@ -4095,6 +4151,11 @@ class MainWindow(QMainWindow):
             pass
         self.dc.dataChanged.emit()
         self.refresh_views()
+        if self.examsDialog is not None:
+            try:
+                self.examsDialog.sync_beisitzer_from_dc()
+            except Exception:
+                pass
         if msg:
             self.statusBar().showMessage(msg, 4000)
         self._update_undo_redo_actions()
@@ -4340,6 +4401,75 @@ class MainWindow(QMainWindow):
         # Zählung aktualisieren
         self._update_day_counts_label()
 
+    def _selected_room_day_exam_ids(self, clicked_index, rm: RightModel):
+        """Return selected exams and whether the selection is one room/day block."""
+        selection = self.rightView.selectionModel()
+        selected_indexes = list(selection.selectedIndexes())
+        clicked_is_selected = any(
+            idx.row() == clicked_index.row() and idx.column() == clicked_index.column()
+            for idx in selected_indexes
+        )
+        if not clicked_is_selected:
+            selection.setCurrentIndex(clicked_index, QItemSelectionModel.ClearAndSelect)
+            selected_indexes = [clicked_index]
+
+        coordinates = set()
+        exam_ids = set()
+        for idx in selected_indexes:
+            if idx.row() < 0 or idx.row() >= len(rm.rows) or idx.column() < 0 or idx.column() >= len(rm.rooms):
+                return [], False
+            week, day, slot = rm.rows[idx.row()]
+            room = str(rm.rooms[idx.column()])
+            coordinates.add((int(week), int(day), room))
+            exam_idx = rm.cell_map.get((week, day, slot, room))
+            if exam_idx is not None:
+                exam_ids.add(int(exam_idx))
+
+        ordered_ids = sorted(exam_ids)
+        one_room_day = len(coordinates) == 1
+        if len(ordered_ids) > 1 and one_room_day:
+            week, day, room = next(iter(coordinates))
+            scheduled = {item.ExamIdx: item for item in self.dc.schedule or []}
+            one_room_day = (
+                room != RightModel.PARKING_ROOM_NAME
+                and all(
+                    (item := scheduled.get(exam_idx)) is not None
+                    and item.Woche == week
+                    and item.Tag == DAYS[day]
+                    and str(item.Raum or "") == room
+                    for exam_idx in ordered_ids
+                )
+            )
+        return ordered_ids, one_room_day
+
+    def change_beisitzer_for_exams(self, exam_ids: List[int]):
+        exams_by_id = {exam.idx: exam for exam in self.dc.exams}
+        before_values = {
+            exam_idx: str(exams_by_id[exam_idx].Beisitzer or "")
+            for exam_idx in exam_ids
+            if exam_idx in exams_by_id
+        }
+        if len(before_values) < 2:
+            return
+        teacher_codes = sorted({
+            str(teacher.Lehrkraft or "").strip()
+            for teacher in self.dc.teachers or []
+            if str(teacher.Lehrkraft or "").strip()
+        })
+        dialog = BeisitzerBatchDialog(self, teacher_codes, len(before_values))
+        if dialog.exec() != QDialog.Accepted:
+            return
+        after_value = dialog.selected_beisitzer
+        if after_value is None or all(value == after_value for value in before_values.values()):
+            return
+
+        command = EditExamBeisitzerBatchCommand(before_values, after_value)
+        command.apply(self.dc)
+        self.dc.push_command(command)
+        if self.examsDialog is not None:
+            self.examsDialog.sync_beisitzer_from_dc()
+        self._update_undo_redo_actions()
+
     def on_rightview_context_menu(self, pos):
         index = self.rightView.indexAt(pos)
         if not index.isValid():
@@ -4347,6 +4477,8 @@ class MainWindow(QMainWindow):
         rm: RightModel = self.rightView.model()
         if not hasattr(rm, "rows") or not hasattr(rm, "rooms"):
             return
+        selected_exam_ids, valid_room_day_group = self._selected_room_day_exam_ids(index, rm)
+        multiple_exams_selected = len(selected_exam_ids) > 1
         w, d, s = rm.rows[index.row()]
         room = rm.rooms[index.column()]
         cell = rm.cell_map.get((w, d, s, room))
@@ -4377,6 +4509,11 @@ class MainWindow(QMainWindow):
         menu.addAction(act_fach)
         menu.addSeparator(); menu.addAction(act_edit_beis)
 
+        if multiple_exams_selected:
+            for action in (act_pruefer, act_pruefer_as_beis, act_beis, act_beis_as_pruefer, act_schueler, act_fach):
+                action.setEnabled(False)
+            act_edit_beis.setEnabled(valid_room_day_group)
+
         chosen = menu.exec(self.rightView.viewport().mapToGlobal(pos))
         if not chosen:
             return
@@ -4406,24 +4543,25 @@ class MainWindow(QMainWindow):
             else:
                 return
         elif chosen == act_edit_beis:
-            # Exams-Dialog öffnen (falls nicht offen) und auf die Zeile mit ex.idx fokussieren
-            try:
-                if self.examsDialog is None:
-                    self.examsDialog = ExamsDialog(self, self.dc)
-                    # Beim Schließen Referenz zurücksetzen
-                    def on_closed():
-                        self.examsDialog = None
-                    self.examsDialog.finished.connect(on_closed)
-                    self.examsDialog.show()
-                else:
-                    # bereits offen -> in den Vordergrund bringen
-                    self.examsDialog.raise_()
-                    self.examsDialog.activateWindow()
-                # Fokus auf die Zeile
-                if hasattr(self.examsDialog, "focus_exam_row"):
-                    self.examsDialog.focus_exam_row(ex.idx)
-            except Exception:
-                pass        
+            if multiple_exams_selected:
+                self.change_beisitzer_for_exams(selected_exam_ids)
+                return
+            else:
+                # Exams-Dialog öffnen (falls nicht offen) und auf die Zeile mit ex.idx fokussieren
+                try:
+                    if self.examsDialog is None:
+                        self.examsDialog = ExamsDialog(self, self.dc)
+                        def on_closed():
+                            self.examsDialog = None
+                        self.examsDialog.finished.connect(on_closed)
+                        self.examsDialog.show()
+                    else:
+                        self.examsDialog.raise_()
+                        self.examsDialog.activateWindow()
+                    if hasattr(self.examsDialog, "focus_exam_row"):
+                        self.examsDialog.focus_exam_row(ex.idx)
+                except Exception:
+                    pass
         else:
             return
         # Refresh beider Views
@@ -5003,6 +5141,80 @@ class ConstraintsDialog(QDialog):
 
         return c
 
+class BeisitzerBatchDialog(QDialog):
+    """Kleiner Bestätigungsdialog für eine gemeinsame Beisitzeränderung."""
+    def __init__(self, parent, teacher_codes: List[str], exam_count: int):
+        super().__init__(parent)
+        self.setWindowTitle("Beisitzer ändern")
+        self.setModal(True)
+        self.selected_beisitzer = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f"Beisitzer für {exam_count} markierte Prüfungen auswählen:"
+        ))
+        self.combo = QComboBox(self)
+        self.combo.addItem("Bitte auswählen …", None)
+        self.combo.addItem("Kein Beisitzer", "")
+        for code in teacher_codes:
+            self.combo.addItem(code, code)
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.NoInsert)
+        self.combo.setCurrentIndex(-1)
+        self.combo.lineEdit().setPlaceholderText("Bitte auswählen …")
+        completer = QCompleter(self.combo.model(), self.combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.combo.setCompleter(completer)
+        layout.addWidget(self.combo)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.apply_button = QPushButton("Übernehmen", self)
+        self.cancel_button = QPushButton("Abbrechen", self)
+        self.apply_button.setEnabled(False)
+        buttons.addWidget(self.apply_button)
+        buttons.addWidget(self.cancel_button)
+        layout.addLayout(buttons)
+
+        self.combo.currentIndexChanged.connect(self._update_apply_enabled)
+        self.combo.editTextChanged.connect(self._update_apply_enabled)
+        self.combo.activated.connect(self._update_apply_enabled)
+        self.apply_button.clicked.connect(self._accept_selection)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Popup- und Trefferliste auf maximal die dreifache Dialoghöhe begrenzen;
+        # zusätzlich innerhalb der verfügbaren Bildschirmhöhe halten.
+        max_height = max(1, self.height() * 3)
+        screen = self.screen()
+        if screen is not None:
+            max_height = min(max_height, screen.availableGeometry().height())
+        row_height = max(1, self.combo.fontMetrics().height() + 8)
+        visible_rows = max(1, max_height // row_height)
+        self.combo.setMaxVisibleItems(visible_rows)
+        self.combo.view().setMaximumHeight(max_height)
+        self.combo.completer().popup().setMaximumHeight(max_height)
+
+    def _update_apply_enabled(self, *_):
+        index = self.combo.currentIndex()
+        valid_selection = (
+            index > 0
+            and self.combo.currentText() == self.combo.itemText(index)
+            and self.combo.itemData(index) is not None
+        )
+        self.apply_button.setEnabled(valid_selection)
+
+    def _accept_selection(self):
+        self._update_apply_enabled()
+        if not self.apply_button.isEnabled():
+            return
+        self.selected_beisitzer = self.combo.currentData()
+        self.accept()
+
+
 class ExamsDialog(QDialog):
     """
     Ausschüsse – editierbar: Thema (Spalte 3), Beisitzer (Spalte 5)
@@ -5130,6 +5342,26 @@ class ExamsDialog(QDialog):
                 self.table.selectRow(match_row)
         except Exception:
             pass
+
+    def sync_beisitzer_from_dc(self):
+        """Spiegelt externe Gruppenänderungen ohne neue Einzel-Undo-Schritte."""
+        exam_by_id = {exam.idx: exam for exam in self.dc.exams}
+        previous_blocked = self.model.blockSignals(True)
+        self._in_programmatic_change = True
+        try:
+            for row in range(self.model.rowCount()):
+                try:
+                    exam_idx = int(self.model.item(row, 0).text())
+                except Exception:
+                    continue
+                exam = exam_by_id.get(exam_idx)
+                item = self.model.item(row, 6)
+                if exam is not None and item is not None:
+                    item.setText(str(exam.Beisitzer or ""))
+            self.apply_row_colors()
+        finally:
+            self._in_programmatic_change = False
+            self.model.blockSignals(previous_blocked)
 
     def load(self):
         self.model.setRowCount(0)

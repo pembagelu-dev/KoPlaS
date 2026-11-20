@@ -71,10 +71,11 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.10 (Build 56); Solver: 0.2 (Build 17)**
+**Aktuelle Version: 1.2.10 (Build 58); Solver: 0.2 (Build 17)**
 
 ### Version 1.2.10
 
+- Gruppen-Beisitzer (GUI Build 58): Prüfungen desselben Raum-Tagesblocks per Umschalt markieren und gemeinsam ändern. Auswahlfenster mit Kürzeln und „Kein Beisitzer“, Übernehmen/Abbrechen sowie einer gemeinsamen Undo-/Redo-Aktion. Offene Prüfungsdialoge werden synchronisiert.
 - Gruppenbearbeitung für Raumwechsel und Beisitzer ergänzt; Bereichsauswahl, Drag-and-drop und Undo/Redo verbessert.
 - Solver um flexible Tageslimits, Schüler-Slotsumme und Raumoptimierung erweitert. Zeit- und Exportdarstellung angepasst.
 - Solverdiagnosen und Ergebnisberichte um konkrete Konflikt- und Statushinweise ergänzt.
