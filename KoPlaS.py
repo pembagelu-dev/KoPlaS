@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 58)"
+Version = "1.2.10 (Build 59)"
 
-# Build 58: Beisitzer für markierte Prüfungen eines Raum-Tagesblocks gemeinsam ändern.
+# Build 59: Markierte Prüfungen eines zusammenhängenden Raum-Tagesblocks gemeinsam verschieben.
 
 import sys
 import os
@@ -536,6 +536,36 @@ class MoveExamCommand(BaseCommand):
         self._apply_state(dc, self.before)
     def label(self) -> str:
         return "Block verschoben"
+
+class MoveExamsCommand(BaseCommand):
+    """Verschiebt mehrere Prüfungen als eine Undo-/Redo-Aktion."""
+    def __init__(self, before: Dict[int, Dict[str, Any]], after: Dict[int, Dict[str, Any]]):
+        self.before = before
+        self.after = after
+
+    def _apply_states(self, dc: "DataController", states: Dict[int, Dict[str, Any]]):
+        state_by_id = {item.ExamIdx: item for item in dc.schedule}
+        for exam_idx, state in states.items():
+            item = state_by_id.get(exam_idx)
+            if item is None:
+                continue
+            item.Woche = state["Woche"]
+            item.Tag = state["Tag"]
+            item.SlotIndex = state["SlotIndex"]
+            item.Raum = state["Raum"]
+            dc.recompute_item_time(item)
+        dc.evaluate_conflicts()
+        dc.evaluate_fair_day_distribution()
+        dc.dataChanged.emit()
+
+    def apply(self, dc: "DataController"):
+        self._apply_states(dc, self.after)
+
+    def revert(self, dc: "DataController"):
+        self._apply_states(dc, self.before)
+
+    def label(self) -> str:
+        return "Markierter Prüfungsblock verschoben"
 
 class EditExamFieldCommand(BaseCommand):
     def __init__(self, exam_idx: int, field_name: str, before_val: Any, after_val: Any):
@@ -1967,6 +1997,7 @@ class RightModel(QAbstractTableModel):
     PARKING_ROOM_NAME = "Kein Raum zugewiesen"
     # Subindex der im Parkplatz angeklickten Kachel fr den aktuellen Drag
     current_drag_from_subindex: Optional[int] = None
+    current_drag_block: Optional[Dict[str, Any]] = None
 
 
     def __init__(self, dc: DataController):
@@ -2037,17 +2068,20 @@ class RightModel(QAbstractTableModel):
 
     def mimeData(self, indexes):
         md = QMimeData()
+        selected = []
         for idx in indexes:
-            if not idx.isValid():
-                continue
-            w, d, s = self.rows[idx.row()]
-            room = self.rooms[idx.column()]
-            cell = self.cell_map.get((w, d, s, room))
-            if cell is not None:
-                payload = {"ExamIdx": cell, "from": (w, d, s, room)}
-                md.setData("application/x-kollo-exam", QByteArray(json.dumps(payload).encode("utf-8")))
-                RightModel.current_drag_exam_idx = cell
-                break
+            if idx.isValid() and 0 <= idx.row() < len(self.rows) and 0 <= idx.column() < len(self.rooms):
+                w, d, s = self.rows[idx.row()]
+                room = self.rooms[idx.column()]
+                exam_idx = self.cell_map.get((w, d, s, room))
+                if exam_idx is not None:
+                    selected.append({"ExamIdx": exam_idx, "from": (w, d, s, room)})
+        if selected:
+            anchor = next((item for item in selected if item["ExamIdx"] == RightModel.current_drag_exam_idx), selected[0])
+            payload = {"ExamIdx": anchor["ExamIdx"], "from": anchor["from"], "block": selected}
+            md.setData("application/x-kollo-exam", QByteArray(json.dumps(payload).encode("utf-8")))
+            RightModel.current_drag_exam_idx = anchor["ExamIdx"]
+            RightModel.current_drag_block = payload
         return md
 
     def supportedDropActions(self):
@@ -2062,6 +2096,7 @@ class RightModel(QAbstractTableModel):
         try:
             payload = json.loads(bytes(data.data("application/x-kollo-exam")).decode("utf-8"))
             ex_idx = payload["ExamIdx"]
+            block = payload.get("block") or [{"ExamIdx": ex_idx, "from": payload.get("from")}]
 
             # Fallback: wenn row/col -1 sind, parent benutzen
             if row < 0 or col < 0:
@@ -2078,25 +2113,55 @@ class RightModel(QAbstractTableModel):
             to_w, to_d, to_s = self.rows[row]
             to_room = self.rooms[col]
 
-            # Änderung: Drop wird immer akzeptiert. Prüfung erfolgt nach dem Setzen für die Färbung/Status.
-            ok, hard_reason, soft_reasons = self._check_move(ex_idx, to_w, to_d, to_s, to_room)
-            # Blockiere nur, wenn Zielslot im Raum belegt ist (einzige Blockade)
-            if not ok and hard_reason and "Ziel-Slot ist bereits belegt" in hard_reason:
-                self.dropped.emit(row, col, ex_idx, f"Nicht möglich: {hard_reason}")
+            # Nur ein markierter, zusammenhängender Block desselben Raum-Tages darf gemeinsam wandern.
+            starts = [entry for entry in block if isinstance(entry.get("from"), (list, tuple)) and len(entry["from"]) == 4]
+            if len(starts) != len(block) or not starts:
                 return False
+            source_week, source_day, source_room = starts[0]["from"][0], starts[0]["from"][1], starts[0]["from"][3]
+            if any(entry["from"][0] != source_week or entry["from"][1] != source_day or entry["from"][3] != source_room for entry in starts):
+                self.dropped.emit(row, col, ex_idx, "Markierte Prüfungen müssen aus demselben Raum-Tagesblock stammen")
+                return False
+            block_ids = [entry["ExamIdx"] for entry in starts]
+            is_block_move = len(block_ids) > 1
+            if ex_idx not in block_ids:
+                return False
+            source_slots = [int(entry["from"][2]) for entry in starts]
+            if is_block_move and (len(set(source_slots)) != len(source_slots) or sorted(source_slots) != list(range(min(source_slots), max(source_slots) + 1))):
+                self.dropped.emit(row, col, ex_idx, "Markierte Prüfungen müssen zusammenhängend sein")
+                return False
+            if is_block_move and (to_w, to_d) != (source_week, source_day):
+                self.dropped.emit(row, col, ex_idx, "Verschieben ist nur innerhalb derselben Woche und desselben Tages möglich")
+                return False
+            anchor_slot = int(next(entry["from"][2] for entry in starts if entry["ExamIdx"] == ex_idx))
+            slot_delta = int(to_s) - anchor_slot
+            destinations = [
+                (entry["ExamIdx"], int(entry["from"][2]) + slot_delta if is_block_move else int(to_s))
+                for entry in starts
+            ]
+            if any(slot < 0 or slot >= self.dc.settings.time.n_slots for _, slot in destinations):
+                return False
+            for moving_id, target_slot in destinations:
+                occupied = self.cell_map.get((to_w, to_d, target_slot, to_room))
+                if occupied is not None and occupied not in block_ids:
+                    self.dropped.emit(row, col, ex_idx, "Nicht möglich: Ziel-Slot ist bereits belegt")
+                    return False
 
-            # Update Schedule (immer setzen, selbst bei harten/soften Regelverstößen)
+            # Bestehende Regeln färben Ziele live; beim Drop blockiert ausschließlich Raumbelegung.
+            ok, hard_reason, soft_reasons = self._check_move(
+                ex_idx, to_w, to_d, to_s, to_room, ignore_exam_ids=set(block_ids)
+            )
+
+            before_states = {}
+            after_states = {}
             did = False
             for it in self.dc.schedule:
-                if it.ExamIdx == ex_idx:
-                    it.Woche = to_w
-                    it.Tag = DAYS[to_d]
-                    it.SlotIndex = to_s
-                    # Uhrzeit stets aus TimeSettings neu berechnen
+                if it.ExamIdx in block_ids:
+                    before_states[it.ExamIdx] = {"Woche": it.Woche, "Tag": it.Tag, "SlotIndex": it.SlotIndex, "Raum": it.Raum}
+                    target_slot = next(slot for moving_id, slot in destinations if moving_id == it.ExamIdx)
+                    it.Woche, it.Tag, it.SlotIndex, it.Raum = to_w, DAYS[to_d], target_slot, to_room
                     self.dc.recompute_item_time(it)
-                    it.Raum = to_room
+                    after_states[it.ExamIdx] = {"Woche": it.Woche, "Tag": it.Tag, "SlotIndex": it.SlotIndex, "Raum": it.Raum}
                     did = True
-                    break
 
             self._recalc()
             self.layoutChanged.emit()
@@ -2112,38 +2177,13 @@ class RightModel(QAbstractTableModel):
             # Undo/Redo: Move als Command erfassen (auch wenn Herkunft PARKING war)
             try:
                 # Helper: Zustand eines Items im aktuellen Plan
-                def find_item_state(dc: DataController, exam_idx: int) -> Dict[str, Any]:
-                    for it in dc.schedule:
-                        if it.ExamIdx == exam_idx:
-                            return {
-                                "Woche": it.Woche, "Tag": it.Tag, "SlotIndex": it.SlotIndex,
-                                "Uhrzeit": getattr(it, "Uhrzeit", None), "Raum": it.Raum
-                            }
-                    # Nicht gefunden -> Parkplatz-Zustand
-                    return {"Woche": None, "Tag": None, "SlotIndex": None, "Uhrzeit": None, "Raum": ""}
-
-                # AFTER-State nach der Platzierung
-                after_state = find_item_state(self.dc, ex_idx)
-
-                # BEFORE-State aus Payload herleiten
-                before_state = None
-                origin = payload.get("from")
-                if isinstance(origin, (list, tuple)) and len(origin) == 4:
-                    bw, bd, bs, broom = origin
-                    # Uhrzeit vorher anhand Settings ermitteln (nur für Konsistenz, kann None bleiben)
-                    before_state = {"Woche": bw, "Tag": DAYS[bd], "SlotIndex": bs, "Uhrzeit": None, "Raum": broom}
-                else:
-                    # Herkunft: PARKING oder unbekannt -> Parkplatz-Zustand
-                    before_state = {"Woche": None, "Tag": None, "SlotIndex": None, "Uhrzeit": None, "Raum": ""}
-                self.dc.push_command(MoveExamCommand(ex_idx, before_state, after_state))
+                self.dc.push_command(MoveExamsCommand(before_states, after_states))
             except Exception:
                 pass
 
             if did:
                 # Statusmeldung auf Basis der Prüfergebnisse
-                if not ok and hard_reason:
-                    self.dropped.emit(row, col, ex_idx, f"Plaziert (harte Regel verletzt: {hard_reason})")
-                elif soft_reasons:
+                if soft_reasons:
                     self.dropped.emit(row, col, ex_idx, "Plaziert (Hinweis: " + "; ".join(soft_reasons) + ")")
                 else:
                     self.dropped.emit(row, col, ex_idx, "Plaziert")
@@ -2157,6 +2197,7 @@ class RightModel(QAbstractTableModel):
         finally:
             RightModel.current_drag_exam_idx = None
             RightModel.current_drag_from_subindex = None
+            RightModel.current_drag_block = None
 
     def data(self, index, role):
         if not index.isValid():
@@ -2194,7 +2235,27 @@ class RightModel(QAbstractTableModel):
                 if cell is not None and self._is_highlighted(cell):
                     return COLOR_HIGHLIGHT_VIOLET
 
-                ok, hard_reason, soft_reasons = self._check_move(drag_idx, w, d, s, room)
+                drag_block = RightModel.current_drag_block or {}
+                origin = drag_block.get("from")
+                if origin and len(drag_block.get("block", [])) > 1 and (w, d) != (origin[0], origin[1]):
+                    return COLOR_HARD_FORBIDDEN
+                ok, hard_reason, soft_reasons = self._check_move(
+                    drag_idx, w, d, s, room,
+                    ignore_exam_ids={entry["ExamIdx"] for entry in drag_block.get("block", [])}
+                )
+                if origin and len(drag_block.get("block", [])) > 1:
+                    anchor_slot = int(origin[2])
+                    delta = s - anchor_slot
+                    ids = {entry["ExamIdx"] for entry in drag_block["block"]}
+                    for entry in drag_block["block"]:
+                        target_slot = int(entry["from"][2]) + delta
+                        if target_slot < 0 or target_slot >= self.dc.settings.time.n_slots:
+                            ok, hard_reason = False, "Block liegt außerhalb des Tages"
+                            break
+                        occupied = self.cell_map.get((w, d, target_slot, room))
+                        if occupied is not None and occupied not in ids:
+                            ok, hard_reason = False, "Ziel-Slot ist bereits belegt"
+                            break
                 if not ok and hard_reason:
                     return COLOR_HARD_FORBIDDEN
                 elif soft_reasons:
@@ -2259,7 +2320,8 @@ class RightModel(QAbstractTableModel):
                 return ex
         return None
 
-    def _check_move(self, exam_idx: int, to_w: int, to_d: int, to_s: int, to_room: str) -> Tuple[bool, Optional[str], List[str]]:
+    def _check_move(self, exam_idx: int, to_w: int, to_d: int, to_s: int, to_room: str,
+                    ignore_exam_ids: Optional[Set[int]] = None) -> Tuple[bool, Optional[str], List[str]]:
         ex = self._exam_by_idx(exam_idx)
         if ex is None:
             return False, "Unbekannte Prüfung", []
@@ -2270,7 +2332,7 @@ class RightModel(QAbstractTableModel):
         # Ziel-Slot bereits belegt? (einzige Drop-Blockade)
         if self.cell_map.get((to_w, to_d, to_s, to_room)) is not None:
             occupied_idx = self.cell_map.get((to_w, to_d, to_s, to_room))
-            if occupied_idx != exam_idx:
+            if occupied_idx != exam_idx and occupied_idx not in (ignore_exam_ids or set()):
                 return False, "Ziel-Slot ist bereits belegt", []
 
         # No Exam Days (hart)
@@ -2289,7 +2351,7 @@ class RightModel(QAbstractTableModel):
 
         # Ressourcen-Konflikte (hart)
         for it in self.dc.schedule:
-            if it.Woche == to_w and it.Tag == DAYS[to_d] and it.SlotIndex == to_s and it.ExamIdx != exam_idx:
+            if it.Woche == to_w and it.Tag == DAYS[to_d] and it.SlotIndex == to_s and it.ExamIdx != exam_idx and it.ExamIdx not in (ignore_exam_ids or set()):
                 other = self._exam_by_idx(it.ExamIdx)
                 if other:
                     if other.Schueler == ex.Schueler:
@@ -2541,6 +2603,19 @@ class RightDelegate(QStyledItemDelegate):
         painter.save()
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        model: RightModel = index.model()
+        drag_block = RightModel.current_drag_block or {}
+        dragged_ids = {entry.get("ExamIdx") for entry in drag_block.get("block", [])}
+        cell_exam_idx = None
+        if hasattr(model, "rows") and hasattr(model, "rooms") and index.isValid():
+            w, d, s = model.rows[index.row()]
+            room = model.rooms[index.column()]
+            cell_exam_idx = model.cell_map.get((w, d, s, room))
+        if cell_exam_idx in dragged_ids:
+            # Der aktuell gegriffene Slot bleibt klar sichtbar; die übrigen
+            # markierten Prüfungen treten während des Ziehens zurück.
+            opacity = 1.0 if cell_exam_idx == RightModel.current_drag_exam_idx else 0.10
+            painter.setOpacity(opacity)
         bg = index.data(Qt.BackgroundRole)
         if isinstance(bg, QColor):
             painter.fillRect(opt.rect, bg)
@@ -2553,9 +2628,9 @@ class RightDelegate(QStyledItemDelegate):
         else:
             painter.fillRect(opt.rect, COLOR_NORMAL)
 
+        painter.setOpacity(1.0)
         painter.setFont(self.font)
         painter.setPen(Qt.black)
-        model: RightModel = index.model()
         if not hasattr(model, "rows") or not hasattr(model, "rooms") or not index.isValid():
             painter.restore()
             return
@@ -2890,13 +2965,17 @@ class ExportPlanOptionsDialog(QDialog):
 # Hauptfenster
 # -------------------------
 class RightTableView(QTableView):
-    """Keep drag-and-drop single-item even while the view supports range selection."""
+    """Keep range selections intact and record the cell used to drag the block."""
     def startDrag(self, supportedActions):
         current = self.currentIndex()
-        if current.isValid():
+        if current.isValid() and not self.selectionModel().isSelected(current):
             self.selectionModel().setCurrentIndex(
                 current, QItemSelectionModel.ClearAndSelect
             )
+        if current.isValid() and isinstance(self.model(), RightModel):
+            week, day, slot = self.model().rows[current.row()]
+            room = self.model().rooms[current.column()]
+            RightModel.current_drag_exam_idx = self.model().cell_map.get((week, day, slot, room))
         super().startDrag(supportedActions)
 
 
