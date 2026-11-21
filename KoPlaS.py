@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 60)"
+Version = "1.2.10 (Build 61)"
 
-# Build 60: Regelhinweise nach einzelnen Drag-and-Drop-Bewegungen anzeigen.
+# Build 61: Ausnahme-Tageslimit für Prüfer konfigurierbar machen.
 
 import sys
 import os
@@ -289,6 +289,7 @@ class ConstraintsSettings:
     soft_minimize_rooms_used: bool = False
     teachers_allow_5_per_day: List[str] = field(default_factory=list)
     default_max_per_day: int = 4
+    exception_max_per_day: int = 5
     soft_prefer_second_slot_start: bool = False
     weight_prefer_second_slot: int = 100  # Multiplikator wird im Solver mit SECOND_SLOT_WEIGHT kombiniert
 
@@ -1564,6 +1565,7 @@ class DataController(QObject):
             soft_minimize_rooms_used=c.soft_minimize_rooms_used,
             teachers_allow_5_per_day=set(c.teachers_allow_5_per_day or []),
             default_max_per_day=c.default_max_per_day,
+            exception_max_per_day=c.exception_max_per_day,
             soft_prefer_second_slot_start=c.soft_prefer_second_slot_start,
             weight_prefer_second_slot=c.weight_prefer_second_slot * c.SECOND_SLOT_WEIGHT,
             ignore_empty_beisitzer=bool(getattr(c, "ignore_empty_beisitzer", True)),
@@ -1742,7 +1744,7 @@ class DataController(QObject):
                     o = exam_by_idx.get(jt.ExamIdx)
                     if o and o.Pruefer == ex.Pruefer:
                         same_day_count += 1
-            max_per = 5 if ex.Pruefer in teachers_allow_5 else default_max_per_day
+            max_per = c.exception_max_per_day if ex.Pruefer in teachers_allow_5 else default_max_per_day
             if same_day_count > max_per:
                 mark(it.ExamIdx, "soft", f"Max/Tag Prüfer überschritten (>{max_per})")
 
@@ -2387,7 +2389,7 @@ class RightModel(QAbstractTableModel):
                 other = self._exam_by_idx(it.ExamIdx)
                 if other and other.Pruefer == ex.Pruefer:
                     same_day_count += 1
-        max_per_day = 5 if ex.Pruefer in (c.teachers_allow_5_per_day or []) else c.default_max_per_day
+        max_per_day = c.exception_max_per_day if ex.Pruefer in (c.teachers_allow_5_per_day or []) else c.default_max_per_day
         if same_day_count > max_per_day:
             soft_msgs.append(f"maximale Prüfungen pro Tag für Prüfer überschritten (>{max_per_day})")
 
@@ -4014,7 +4016,7 @@ class MainWindow(QMainWindow):
                 self.dc.mark_dirty_and_emit()
 
     def on_constraints(self):
-        dlg = ConstraintsDialog(self, self.dc.settings.constraints)
+        dlg = ConstraintsDialog(self, self.dc.settings.constraints, self.dc.settings.time.n_slots)
         if dlg.exec() == QDialog.Accepted:
             old_c = self.dc.settings.constraints
             new_c = dlg.apply()
@@ -5091,7 +5093,7 @@ class TimeDialog(QDialog):
 
 class ConstraintsDialog(QDialog):
     # Unverändert – Ihr bestehender, funktionierender Dialog
-    def __init__(self, parent, c: ConstraintsSettings):
+    def __init__(self, parent, c: ConstraintsSettings, n_slots: int):
         super().__init__(parent)
         self.setWindowTitle("Bedingungen")
         self.c = c
@@ -5127,7 +5129,10 @@ class ConstraintsDialog(QDialog):
             self.spin_soft_gap.setValue(c.soft_desired_gap_days_same_student)
         self.cb_min_rooms = QCheckBox(); self.cb_min_rooms.setChecked(c.soft_minimize_rooms_used)
         self.edit_allow5 = QLineEdit(", ".join(c.teachers_allow_5_per_day or []))
-        self.spin_max_per_day = QSpinBox(); self.spin_max_per_day.setRange(1, 10); self.spin_max_per_day.setValue(c.default_max_per_day)
+        max_slots = max(0, int(n_slots or 0))
+        self.spin_max_per_day = QSpinBox(); self.spin_max_per_day.setRange(0, max_slots); self.spin_max_per_day.setValue(min(c.default_max_per_day, max_slots))
+        self.spin_exception_max_per_day = QSpinBox(); self.spin_exception_max_per_day.setRange(self.spin_max_per_day.value(), max_slots); self.spin_exception_max_per_day.setValue(min(max(c.exception_max_per_day, self.spin_max_per_day.value()), max_slots))
+        self.spin_max_per_day.valueChanged.connect(lambda value: self.spin_exception_max_per_day.setRange(value, max_slots))
         self.cb_pref_second = QCheckBox(); self.cb_pref_second.setChecked(c.soft_prefer_second_slot_start)
         self.spin_pref_weight = QSpinBox(); self.spin_pref_weight.setRange(1, 100); self.spin_pref_weight.setValue(c.weight_prefer_second_slot); self.spin_pref_weight.setEnabled(self.cb_pref_second.isChecked())
         self.cb_ignore_empty_beisitzer = QCheckBox(); self.cb_ignore_empty_beisitzer.setChecked(getattr(c, "ignore_empty_beisitzer", True))
@@ -5165,8 +5170,9 @@ class ConstraintsDialog(QDialog):
         hl4 = QHBoxLayout(); hl4.addWidget(self.cb_soft_gap); hl4.addWidget(QLabel("gewünschter Abstand in Tagen:")); hl4.addWidget(self.spin_soft_gap)
         form.addRow("Abstand gleicher Schüler (weich)", hl4)
         form.addRow("Min. Räume (weich)", self.cb_min_rooms)
-        form.addRow("Prüfer mit 5 Prüfungen/Tag (kommagetrennt)", self.edit_allow5)
-        form.addRow("Prüfungen/Tag für übrige Prüfer", self.spin_max_per_day)
+        form.addRow("Prüfungen/Tag für reguläre Prüfer", self.spin_max_per_day)
+        form.addRow("Prüfer mit abweichender Prüfungszahl/Tag (kommagetrennt)", self.edit_allow5)
+        form.addRow("Prüfungen/Tag für ausgewählte Prüfer", self.spin_exception_max_per_day)
         hl5 = QHBoxLayout(); hl5.addWidget(self.cb_pref_second); hl5.addWidget(QLabel("Gewicht:")); hl5.addWidget(self.spin_pref_weight)
         form.addRow("Start im 2. Slot (weich)", hl5)
         form.addRow(QLabel("—"))
@@ -5214,6 +5220,7 @@ class ConstraintsDialog(QDialog):
         c.soft_minimize_rooms_used = self.cb_min_rooms.isChecked()
         c.teachers_allow_5_per_day = [t.strip() for t in self.edit_allow5.text().split(",") if t.strip()]
         c.default_max_per_day = int(self.spin_max_per_day.value())
+        c.exception_max_per_day = int(self.spin_exception_max_per_day.value())
         c.soft_prefer_second_slot_start = self.cb_pref_second.isChecked()
         c.weight_prefer_second_slot = int(self.spin_pref_weight.value())
 

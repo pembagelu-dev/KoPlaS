@@ -56,6 +56,7 @@ class ConstraintsConfig:
 
     teachers_allow_5_per_day: Set[str]
     default_max_per_day: int
+    exception_max_per_day: int
 
     soft_prefer_second_slot_start: bool
     weight_prefer_second_slot: int
@@ -354,7 +355,7 @@ class ColloquiumScheduler:
                f"Abstand Schüler (Tage): {self.config.hard_min_gap_days_same_student},",
                f"Tage ohne Prüfungen: {self.config.hard_no_exam_days_enabled},",
                f"Max. Tage/Lehrer: {self.config.hard_max_days_per_teacher_enabled} (K={self.config.hard_max_days_per_teacher_K}),",
-               f"Max/Tag je Prüfer: {self.config.default_max_per_day} (5er-Ausnahmen: {len(self.config.teachers_allow_5_per_day)})")
+               f"Max/Tag je Prüfer: {self.config.default_max_per_day} (Ausnahmen bis {self.config.exception_max_per_day}: {len(self.config.teachers_allow_5_per_day)})")
 
         # 1) Schüler pro Woche genau eine Prüfung (hart & exakt, unverändert)
         if self.config.hard_student_one_per_week:
@@ -492,7 +493,7 @@ class ColloquiumScheduler:
         # (Prüfer + Beisitzer, sofern Beisitzer nicht ignoriert/leer). Dadurch zählt diese Regel
         # Einsätze in beiden Rollen in die Tagesobergrenze mit ein.
         for teacher, exs in exams_by_teacher.items():
-            max_per_day = 5 if teacher in self.config.teachers_allow_5_per_day else self.config.default_max_per_day
+            max_per_day = self.config.exception_max_per_day if teacher in self.config.teachers_allow_5_per_day else self.config.default_max_per_day
             for (w, d), day_slots in self.day_to_gslots.items():
                 self.model.Add(sum(self.x[(e.idx, g)] for e in exs for g in day_slots) <= max_per_day)
 
@@ -730,7 +731,7 @@ class ColloquiumScheduler:
                                 "Prüfer und Beisitzer. Weisen Sie unterschiedliche Lehrkräfte zu.")
         for person, exams in self._exams_by_teacher.items():
             days = set().union(*(domains[e.idx] for e in exams))
-            limit = 5 if person in self.config.teachers_allow_5_per_day else self.config.default_max_per_day
+            limit = self.config.exception_max_per_day if person in self.config.teachers_allow_5_per_day else self.config.default_max_per_day
             capacities = sorted((min(limit, len(self.day_to_gslots[day])) for day in days), reverse=True)
             max_days = len(days)
             if self.config.hard_max_days_per_teacher_enabled and self.config.hard_max_days_per_teacher_K is not None:
@@ -1594,6 +1595,7 @@ def collect_constraints() -> Tuple[ConstraintsConfig, Dict[str, Set[Tuple[int, i
         soft_minimize_rooms_used=soft_minimize_rooms_used,
         teachers_allow_5_per_day=allow5,
         default_max_per_day=default_max_per_day,
+        exception_max_per_day=5,
         soft_prefer_second_slot_start=soft_prefer_second_slot_start,
         weight_prefer_second_slot=weight_prefer_second_slot,
         ignore_empty_beisitzer=ignore_empty_beisitzer,
