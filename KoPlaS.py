@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 59)"
+Version = "1.2.10 (Build 60)"
 
-# Build 59: Markierte Prüfungen eines zusammenhängenden Raum-Tagesblocks gemeinsam verschieben.
+# Build 60: Regelhinweise nach einzelnen Drag-and-Drop-Bewegungen anzeigen.
 
 import sys
 import os
@@ -2183,7 +2183,14 @@ class RightModel(QAbstractTableModel):
 
             if did:
                 # Statusmeldung auf Basis der Prüfergebnisse
-                if soft_reasons:
+                if not is_block_move:
+                    state = self.dc.conflict_map.get(ex_idx)
+                    rule_messages = list(dict.fromkeys(state[1])) if state else []
+                    if rule_messages:
+                        self.dropped.emit(row, col, ex_idx, "Plaziert (Hinweis: " + "; ".join(rule_messages) + ")")
+                    else:
+                        self.dropped.emit(row, col, ex_idx, "Plaziert")
+                elif soft_reasons:
                     self.dropped.emit(row, col, ex_idx, "Plaziert (Hinweis: " + "; ".join(soft_reasons) + ")")
                 else:
                     self.dropped.emit(row, col, ex_idx, "Plaziert")
