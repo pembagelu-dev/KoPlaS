@@ -50,6 +50,8 @@ class ConstraintsConfig:
     hard_no_exam_days_enabled: bool
     hard_max_days_per_teacher_enabled: bool
     hard_max_days_per_teacher_K: Optional[int]
+    teachers_allow_more_days: Set[str]
+    hard_max_days_per_teacher_exception_K: Optional[int]
 
     soft_desired_gap_days_same_student: Optional[int]
     soft_minimize_rooms_used: bool
@@ -354,7 +356,8 @@ class ColloquiumScheduler:
                f"Abwesenheiten: {self.config.hard_unavailability},",
                f"Abstand Schüler (Tage): {self.config.hard_min_gap_days_same_student},",
                f"Tage ohne Prüfungen: {self.config.hard_no_exam_days_enabled},",
-               f"Max. Tage/Lehrer: {self.config.hard_max_days_per_teacher_enabled} (K={self.config.hard_max_days_per_teacher_K}),",
+               f"Max. Tage/Lehrer: {self.config.hard_max_days_per_teacher_enabled} (K={self.config.hard_max_days_per_teacher_K}; "
+               f"Ausnahmen={len(self.config.teachers_allow_more_days)} bis {self.config.hard_max_days_per_teacher_exception_K}),",
                f"Max/Tag je Prüfer: {self.config.default_max_per_day} (Ausnahmen bis {self.config.exception_max_per_day}: {len(self.config.teachers_allow_5_per_day)})")
 
         # 1) Schüler pro Woche genau eine Prüfung (hart & exakt, unverändert)
@@ -485,7 +488,13 @@ class ColloquiumScheduler:
                     # Richtung x <= used ließ den Solver used immer auf 0 setzen.
                     self.model.AddMaxEquality(used, occupied)
                     day_used_vars.append(used)
-                self.model.Add(sum(day_used_vars) <= Kmax)
+                person_Kmax = (
+                    self.config.hard_max_days_per_teacher_exception_K
+                    if person in self.config.teachers_allow_more_days
+                    and self.config.hard_max_days_per_teacher_exception_K is not None
+                    else Kmax
+                )
+                self.model.Add(sum(day_used_vars) <= person_Kmax)
 
         # 7) Max. Prüfungen pro Prüfer/Tag (hart)
         exams_by_teacher = self._exams_by_teacher  # bereits vorbereitet
@@ -735,8 +744,14 @@ class ColloquiumScheduler:
             capacities = sorted((min(limit, len(self.day_to_gslots[day])) for day in days), reverse=True)
             max_days = len(days)
             if self.config.hard_max_days_per_teacher_enabled and self.config.hard_max_days_per_teacher_K is not None:
-                max_days = min(max_days, max(0, self.config.hard_max_days_per_teacher_K))
-                capacities = capacities[:max(0, self.config.hard_max_days_per_teacher_K)]
+                person_K = (
+                    self.config.hard_max_days_per_teacher_exception_K
+                    if person in self.config.teachers_allow_more_days
+                    and self.config.hard_max_days_per_teacher_exception_K is not None
+                    else self.config.hard_max_days_per_teacher_K
+                )
+                max_days = min(max_days, max(0, person_K))
+                capacities = capacities[:max(0, person_K)]
             possible = sum(capacities)
             if len(exams) > possible:
                 p = sum(e.pruefer == person for e in exams)
@@ -1591,6 +1606,8 @@ def collect_constraints() -> Tuple[ConstraintsConfig, Dict[str, Set[Tuple[int, i
         hard_no_exam_days_enabled=hard_no_exam_days_enabled,
         hard_max_days_per_teacher_enabled=hard_max_days_per_teacher_enabled,
         hard_max_days_per_teacher_K=hard_max_days_per_teacher_K,
+        teachers_allow_more_days=set(),
+        hard_max_days_per_teacher_exception_K=hard_max_days_per_teacher_K,
         soft_desired_gap_days_same_student=soft_desired_gap_days_same_student,
         soft_minimize_rooms_used=soft_minimize_rooms_used,
         teachers_allow_5_per_day=allow5,

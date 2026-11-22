@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 61)"
+Version = "1.2.10 (Build 62)"
 
-# Build 61: Ausnahme-Tageslimit für Prüfer konfigurierbar machen.
+# Build 62: Prüferbezogene Ausnahme für maximale Prüfungstage ergänzen.
 
 import sys
 import os
@@ -284,6 +284,8 @@ class ConstraintsSettings:
     no_exam_days: List[str] = field(default_factory=list)  # ["Mo1","Di2"]
     hard_max_days_per_teacher_enabled: bool = False
     hard_max_days_per_teacher_K: Optional[int] = None
+    teachers_allow_more_days: List[str] = field(default_factory=list)
+    hard_max_days_per_teacher_exception_K: Optional[int] = None
     # Soft
     soft_desired_gap_days_same_student: Optional[int] = None
     soft_minimize_rooms_used: bool = False
@@ -960,7 +962,8 @@ class DataController(QObject):
         constraints = self.settings.constraints
         unavailable = set((constraints.unavailability or {}).keys())
         allowed_five = set(constraints.teachers_allow_5_per_day or [])
-        return (unavailable | allowed_five) - active_codes
+        allowed_more_days = set(constraints.teachers_allow_more_days or [])
+        return (unavailable | allowed_five | allowed_more_days) - active_codes
 
     def _rebuild_teacher_index(self):
         """
@@ -1561,6 +1564,8 @@ class DataController(QObject):
             hard_no_exam_days_enabled=c.hard_no_exam_days_enabled,
             hard_max_days_per_teacher_enabled=c.hard_max_days_per_teacher_enabled,
             hard_max_days_per_teacher_K=c.hard_max_days_per_teacher_K,
+            teachers_allow_more_days=set(c.teachers_allow_more_days or []),
+            hard_max_days_per_teacher_exception_K=c.hard_max_days_per_teacher_exception_K,
             soft_desired_gap_days_same_student=c.soft_desired_gap_days_same_student,
             soft_minimize_rooms_used=c.soft_minimize_rooms_used,
             teachers_allow_5_per_day=set(c.teachers_allow_5_per_day or []),
@@ -1677,15 +1682,19 @@ class DataController(QObject):
         # Harter Check: max Tage pro Person (rollenübergreifend)
         if c.hard_max_days_per_teacher_enabled and c.hard_max_days_per_teacher_K is not None:
             K_days = int(c.hard_max_days_per_teacher_K)
+            exception_people = set(c.teachers_allow_more_days or [])
+            exception_K = (c.hard_max_days_per_teacher_exception_K
+                           if c.hard_max_days_per_teacher_exception_K is not None else K_days)
             for person, day_set in days_by_person.items():
-                if len(day_set) > K_days:
+                person_K = exception_K if person in exception_people else K_days
+                if len(day_set) > person_K:
                     # Markiere alle Items an Tagen, die zur Überschreitung beitragen
                     for it in planned:
                         ex = exam_by_idx.get(it.ExamIdx)
                         if not ex:
                             continue
                         if (ex.Pruefer == person or (ex.Beisitzer or "") == person):
-                            mark(it.ExamIdx, "hard", f"Max Tage pro Person überschritten (K={K_days})")
+                            mark(it.ExamIdx, "hard", f"Max Tage pro Person überschritten (K={person_K})")
 
         # Prüfen pro geplantes Item (weitere Regeln)
         for it in planned:
@@ -2465,6 +2474,9 @@ class RightModel(QAbstractTableModel):
         # Harte K-Regel: max Tage pro Person (rollenübergreifend, alle Wochen)
         if c.hard_max_days_per_teacher_enabled and c.hard_max_days_per_teacher_K is not None:
             K_days = int(c.hard_max_days_per_teacher_K)
+            exception_people = set(c.teachers_allow_more_days or [])
+            exception_K = (c.hard_max_days_per_teacher_exception_K
+                           if c.hard_max_days_per_teacher_exception_K is not None else K_days)
             # Prüfe K nur für die am aktuell verschobenen Block beteiligten Personen (rollenübergreifend)
             involved_persons: List[str] = []
             if ex.Pruefer:
@@ -2512,8 +2524,9 @@ class RightModel(QAbstractTableModel):
 
             # prüfen: nur für die beteiligten Personen
             for person, dset in days_by_person.items():
-                if len(dset) > K_days:
-                    return False, f"maximale Tage pro Prüfer/Beisitzer überschritten (K={K_days})", []
+                person_K = exception_K if person in exception_people else K_days
+                if len(dset) > person_K:
+                    return False, f"maximale Tage pro Prüfer/Beisitzer überschritten (K={person_K})", []
 
         # Soft-Hinweise
         soft = list(soft_msgs)
@@ -5121,6 +5134,16 @@ class ConstraintsDialog(QDialog):
         self.spin_max_days = QSpinBox(); self.spin_max_days.setRange(1, 10); self.spin_max_days.setEnabled(self.cb_max_days.isChecked())
         if c.hard_max_days_per_teacher_K is not None:
             self.spin_max_days.setValue(c.hard_max_days_per_teacher_K or 2)
+        self.edit_allow_more_days = QLineEdit(", ".join(c.teachers_allow_more_days or []))
+        self.spin_exception_days = QSpinBox()
+        max_available_days = self._available_exam_days()
+        self.spin_max_days.setRange(0, max_available_days)
+        self.spin_exception_days.setRange(self.spin_max_days.value(), max_available_days)
+        self.spin_exception_days.setValue(
+            c.hard_max_days_per_teacher_exception_K
+            if c.hard_max_days_per_teacher_exception_K is not None
+            else self.spin_max_days.value()
+        )
 
         # Soft
         self.cb_soft_gap = QCheckBox(); self.cb_soft_gap.setChecked(c.soft_desired_gap_days_same_student is not None)
@@ -5151,6 +5174,16 @@ class ConstraintsDialog(QDialog):
         self.cb_min_gap.toggled.connect(self.spin_min_gap.setEnabled)
         self.cb_no_exam.toggled.connect(lambda on: self.edit_no_exam.setEnabled(on))
         self.cb_max_days.toggled.connect(self.spin_max_days.setEnabled)
+        self.cb_max_days.toggled.connect(self.edit_allow_more_days.setEnabled)
+        self.cb_max_days.toggled.connect(self.spin_exception_days.setEnabled)
+        self.spin_max_days.valueChanged.connect(
+            lambda value: self.spin_exception_days.setRange(value, self._available_exam_days())
+        )
+        self.edit_no_exam.textChanged.connect(self._update_teacher_day_ranges)
+        self.cb_no_exam.toggled.connect(self._update_teacher_day_ranges)
+        self.spin_max_days.setEnabled(self.cb_max_days.isChecked())
+        self.edit_allow_more_days.setEnabled(self.cb_max_days.isChecked())
+        self.spin_exception_days.setEnabled(self.cb_max_days.isChecked())
         self.cb_pref_second.toggled.connect(self.spin_pref_weight.setEnabled)
         self.cb_soft_gap.toggled.connect(self.spin_soft_gap.setEnabled)
         self.cb_fair.toggled.connect(self.spin_fair.setEnabled)
@@ -5166,6 +5199,8 @@ class ConstraintsDialog(QDialog):
         form.addRow("Liste Tage (z.B. Mo1, Di2)", self.edit_no_exam)
         hl3 = QHBoxLayout(); hl3.addWidget(self.cb_max_days); hl3.addWidget(QLabel("Max. Prüfungstage/Person:")); hl3.addWidget(self.spin_max_days)
         form.addRow("Max. Tage pro Prüfer (hart)", hl3)
+        form.addRow("Prüfer mit Ausnahme (kommagetrennt, gilt rollenübergreifend)", self.edit_allow_more_days)
+        form.addRow("Max. Prüfungstage für ausgewählte Prüfer", self.spin_exception_days)
         form.addRow(QLabel("—"))
         hl4 = QHBoxLayout(); hl4.addWidget(self.cb_soft_gap); hl4.addWidget(QLabel("gewünschter Abstand in Tagen:")); hl4.addWidget(self.spin_soft_gap)
         form.addRow("Abstand gleicher Schüler (weich)", hl4)
@@ -5215,6 +5250,10 @@ class ConstraintsDialog(QDialog):
         c.no_exam_days = [t.strip() for t in self.edit_no_exam.text().split(",") if t.strip()] if c.hard_no_exam_days_enabled else []
         c.hard_max_days_per_teacher_enabled = self.cb_max_days.isChecked()
         c.hard_max_days_per_teacher_K = int(self.spin_max_days.value()) if c.hard_max_days_per_teacher_enabled else None
+        c.teachers_allow_more_days = [t.strip() for t in self.edit_allow_more_days.text().split(",") if t.strip()]
+        c.hard_max_days_per_teacher_exception_K = (
+            int(self.spin_exception_days.value()) if c.hard_max_days_per_teacher_enabled else None
+        )
 
         c.soft_desired_gap_days_same_student = int(self.spin_soft_gap.value()) if self.cb_soft_gap.isChecked() else None
         c.soft_minimize_rooms_used = self.cb_min_rooms.isChecked()
@@ -5233,6 +5272,21 @@ class ConstraintsDialog(QDialog):
         c.fair_day_distribution_slotsum = int(self.spin_fair.value())
 
         return c
+
+    def _available_exam_days(self) -> int:
+        excluded = set()
+        if self.cb_no_exam.isChecked():
+            for token in self.edit_no_exam.text().split(","):
+                token = token.strip()
+                if len(token) < 3 or token[:2] not in DAYS or token[2:] not in ("1", "2"):
+                    continue
+                excluded.add((int(token[2:]), token[:2]))
+        return max(0, len(WEEKS) * len(DAYS) - len(excluded))
+
+    def _update_teacher_day_ranges(self, *_):
+        maximum = self._available_exam_days()
+        self.spin_max_days.setRange(0, maximum)
+        self.spin_exception_days.setRange(self.spin_max_days.value(), maximum)
 
 class BeisitzerBatchDialog(QDialog):
     """Kleiner Bestätigungsdialog für eine gemeinsame Beisitzeränderung."""
