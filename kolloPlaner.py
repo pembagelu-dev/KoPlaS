@@ -1114,8 +1114,6 @@ class ColloquiumScheduler:
                             report["findings"].append(f"Kopplung nicht erzwungen: Thema „{key[0]}“, Fach {key[1]}, "
                                                       f"Prüfer {key[2]}: kein Tag hat {len(chunk)} Slots. "
                                                       "Prüfen Sie Slotzahl oder Blockgröße.")
-            if self.config.soft_minimize_rooms_used:
-                report["wishes"].append("Wunsch „Min. Räume“: Der Schalter hat derzeit keine eigene Wirkung im Solver.")
         elif status == cp_model.INFEASIBLE:
             report["summary"] = "Mit den aktuellen Daten und harten Regeln ist kein Zeitplan möglich (nachgewiesen)."
             report["findings"] = self._infeasibility_findings()
@@ -1284,10 +1282,21 @@ class ColloquiumScheduler:
             for r in range(R):
                 model.Add(sum(z[(s, r, c)] for c in slot_clusters[s]) <= 1)
 
-        # Minimiere die bestehende Raumreihenfolgepräferenz. Die früheren
-        # Raumlückenvariablen konnten im Minimierungsmodell stets 0 bleiben.
+        # Bei aktivem Wunsch zuerst die Zahl der Räume minimieren und die
+        # Raumreihenfolge nur als Tie-Breaker verwenden.
         a_order_term = sum((r + 1) * a[c][r] for c in range(K) for r in range(R))
-        model.Minimize(a_order_term)
+        if self.config.soft_minimize_rooms_used:
+            used_room = [model.NewBoolVar(f"used_r{r}") for r in range(R)]
+            for c in range(K):
+                for r in range(R):
+                    model.Add(a[c][r] <= used_room[r])
+            # Die Raumreihenfolge-Summe liegt höchstens bei K * R.
+            # Ein Faktor darüber macht die Raumanzahl lexikografisch vorrangig.
+            room_count_weight = K * R + 1
+            model.Minimize(room_count_weight * sum(used_room) + a_order_term)
+        else:
+            # Die früheren Raumlückenvariablen konnten im Minimierungsmodell stets 0 bleiben.
+            model.Minimize(a_order_term)
 
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = MIP_ROOM_SOLVER_LIMIT

@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 63)"
+Version = "1.2.10 (Build 64)"
 
-# Build 63: Einzelne Beisitzeränderungen über den Sammeldialog ermöglichen.
+# Build 64: Weiches Ziel „Min. Räume“ in der täglichen Raumvergabe umsetzen.
 
 import sys
 import os

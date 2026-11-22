@@ -56,7 +56,7 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 | Datei | Aufgabe |
 | --- | --- |
-| `KoPlaS.py` (1.2.10 Build 63) | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
+| `KoPlaS.py` (1.2.10 Build 64) | Grafische Desktop-Anwendung, Datenverwaltung, interaktive Planung und Exportsteuerung |
 | `kolloPlaner.py` (0.2 Build 17) | Solver-Logik für die Zeit- und Raumplanung mit CP-SAT und MIP |
 | `import_asv.py` (0.1 Build 6) | Einlesen und Umformen von ASV-CSV-Daten für den Import in den Planungsablauf |
 | `export.py` (0.1 Build 14) | Erzeugung der Word-Pläne und Excel-Tabellen |
@@ -71,10 +71,11 @@ python -m pip install PySide6 pandas ortools python-docx openpyxl
 
 ## Version und Änderungshistorie
 
-**Aktuelle Version: 1.2.10 (Build 63); Solver: 0.2 (Build 17)**
+**Aktuelle Version: 1.2.10 (Build 64); Solver: 0.2 (Build 17)**
 
 ### Version 1.2.10
 
+- „Min. Räume“ minimiert die täglich genutzte Raumzahl
 - Beisitzeränderungen an einzelnen Prüfungen verwenden denselben Dialog und Undo-Schritt wie Sammeländerungen.
 - Abweichende Höchstzahl an Prüfungstagen für ausgewählte Prüfer festlegen
 - Ausnahmezahl der Prüfungen pro Tag für ausgewählte Prüfer einstellbar
