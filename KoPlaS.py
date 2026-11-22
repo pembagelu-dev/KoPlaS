@@ -1,6 +1,6 @@
-Version = "1.2.10 (Build 62)"
+Version = "1.2.10 (Build 63)"
 
-# Build 62: Prüferbezogene Ausnahme für maximale Prüfungstage ergänzen.
+# Build 63: Einzelne Beisitzeränderungen über den Sammeldialog ermöglichen.
 
 import sys
 import os
@@ -4550,14 +4550,14 @@ class MainWindow(QMainWindow):
             for exam_idx in exam_ids
             if exam_idx in exams_by_id
         }
-        if len(before_values) < 2:
+        if not before_values:
             return
         teacher_codes = sorted({
             str(teacher.Lehrkraft or "").strip()
             for teacher in self.dc.teachers or []
             if str(teacher.Lehrkraft or "").strip()
         })
-        dialog = BeisitzerBatchDialog(self, teacher_codes, len(before_values))
+        dialog = BeisitzerSelectionDialog(self, teacher_codes, len(before_values))
         if dialog.exec() != QDialog.Accepted:
             return
         after_value = dialog.selected_beisitzer
@@ -4644,25 +4644,8 @@ class MainWindow(QMainWindow):
             else:
                 return
         elif chosen == act_edit_beis:
-            if multiple_exams_selected:
-                self.change_beisitzer_for_exams(selected_exam_ids)
-                return
-            else:
-                # Exams-Dialog öffnen (falls nicht offen) und auf die Zeile mit ex.idx fokussieren
-                try:
-                    if self.examsDialog is None:
-                        self.examsDialog = ExamsDialog(self, self.dc)
-                        def on_closed():
-                            self.examsDialog = None
-                        self.examsDialog.finished.connect(on_closed)
-                        self.examsDialog.show()
-                    else:
-                        self.examsDialog.raise_()
-                        self.examsDialog.activateWindow()
-                    if hasattr(self.examsDialog, "focus_exam_row"):
-                        self.examsDialog.focus_exam_row(ex.idx)
-                except Exception:
-                    pass
+            self.change_beisitzer_for_exams(selected_exam_ids)
+            return
         else:
             return
         # Refresh beider Views
@@ -4888,22 +4871,8 @@ class MainWindow(QMainWindow):
             else:
                 return
         elif chosen == act_edit_beis:
-            # Exams-Dialog öffnen (falls nicht offen) und auf die Zeile mit ex.idx fokussieren
-            try:
-                if self.examsDialog is None:
-                    self.examsDialog = ExamsDialog(self, self.dc)
-                    # Beim Schließen Referenz zurücksetzen
-                    def on_closed():
-                        self.examsDialog = None
-                    self.examsDialog.finished.connect(on_closed)
-                    self.examsDialog.show()
-                else:
-                    self.examsDialog.raise_()
-                    self.examsDialog.activateWindow()
-                if hasattr(self.examsDialog, "focus_exam_row"):
-                    self.examsDialog.focus_exam_row(ex.idx)
-            except Exception:
-                pass        
+            self.change_beisitzer_for_exams([ex.idx])
+            return
         else:
             return
         # Refresh beider Views
@@ -5288,8 +5257,8 @@ class ConstraintsDialog(QDialog):
         self.spin_max_days.setRange(0, maximum)
         self.spin_exception_days.setRange(self.spin_max_days.value(), maximum)
 
-class BeisitzerBatchDialog(QDialog):
-    """Kleiner Bestätigungsdialog für eine gemeinsame Beisitzeränderung."""
+class BeisitzerSelectionDialog(QDialog):
+    """Dialog zur Auswahl eines Beisitzers für eine oder mehrere Prüfungen."""
     def __init__(self, parent, teacher_codes: List[str], exam_count: int):
         super().__init__(parent)
         self.setWindowTitle("Beisitzer ändern")
@@ -5297,9 +5266,8 @@ class BeisitzerBatchDialog(QDialog):
         self.selected_beisitzer = None
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            f"Beisitzer für {exam_count} markierte Prüfungen auswählen:"
-        ))
+        count_label = "1 Prüfung" if exam_count == 1 else f"{exam_count} Prüfungen"
+        layout.addWidget(QLabel(f"Beisitzer für {count_label} auswählen:"))
         self.combo = QComboBox(self)
         self.combo.addItem("Bitte auswählen …", None)
         self.combo.addItem("Kein Beisitzer", "")
